@@ -1,0 +1,3 @@
+# Build do PlatformIO (centenas de MB, sempre regeravel com `pio run`)
+.pio/
+.vscode/

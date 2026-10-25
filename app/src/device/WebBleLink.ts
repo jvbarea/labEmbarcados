@@ -8,14 +8,21 @@
  * as telas nao mudam nos dois casos.
  *
  * A API exige um GESTO DO USUARIO para abrir o seletor de dispositivos, entao
- * connect() so funciona a partir de um toque em botao. O auto-connect do
- * bootstrap falha de proposito, e a mensagem de erro diz o que fazer.
+ * a primeira conexao so funciona a partir de um toque em botao. O auto-connect
+ * do bootstrap falha de proposito, e a mensagem de erro diz o que fazer. Depois
+ * que o comedouro foi escolhido uma vez, reconectar nao precisa do seletor.
+ *
+ * Tres cuidados que este arquivo resolve:
+ *  - o GATT faz uma operacao por vez: as escritas passam por uma fila;
+ *  - mensagem maior que um pacote vai em pedacos (ver framing.ts);
+ *  - queda de conexao: tenta reconectar sozinho, com espera crescente.
  *
  * Firmware do outro lado: teste_componentes/teste_esp/firmware_ble.
  */
 
 import { Platform } from 'react-native';
 
+import { APP_CHUNK_BYTES, FrameAssembler, FrameTooBigError, encodeFrames } from './framing';
 import { AppMessage, DeviceMessage, decodeDeviceMessage, encodeAppMessage } from './protocol';
 import {
   ConnectionHandler,
@@ -32,12 +39,10 @@ const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP -> app (notify)
 
 const DEVICE_NAME_PREFIX = 'Aliment';
 
-/**
- * Acima disto a escrita depende de "long write", que nem toda pilha BLE aceita.
- * O firmware avisa no log quando uma mensagem passa do MTU; aqui avisamos no
- * console do navegador, para a causa aparecer nos dois lados.
- */
-const SAFE_WRITE_BYTES = 180;
+/** Espera entre tentativas de reconexao; depois da lista, RECONNECT_MAX_MS. */
+const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000];
+const RECONNECT_MAX_MS = 15000;
+const RECONNECT_MAX_ATTEMPTS = 10;
 
 // --------------------------------------------------------------------- tipos
 // Declaracoes minimas da Web Bluetooth API. Evitam depender de
@@ -88,12 +93,17 @@ export function webBleAvailable(): boolean {
 
 // ------------------------------------------------------------------- erros
 
+function disconnectedError(): LinkError {
+  return new LinkError('Sem conexão com o comedouro.', 'disconnected');
+}
+
 /**
  * Traduz os erros da API para algo que faca sentido na tela. O mais comum de
  * longe e o gesto do usuario: o bootstrap tenta conectar sozinho ao abrir o app
  * e o navegador recusa.
  */
 function asLinkError(err: unknown): LinkError {
+  if (err instanceof LinkError) return err;
   const nome = (err as { name?: string })?.name ?? '';
   const msg = (err as { message?: string })?.message ?? '';
 
@@ -102,10 +112,10 @@ function asLinkError(err: unknown): LinkError {
   }
   if (nome === 'NotFoundError') {
     // Tambem aparece quando a pessoa fecha o seletor sem escolher nada.
-    return new LinkError('Nenhum comedouro escolhido. Ele esta ligado?', 'not_found');
+    return new LinkError('Nenhum comedouro escolhido. Ele está ligado?', 'not_found');
   }
   if (nome === 'SecurityError') {
-    return new LinkError('O navegador bloqueou o Bluetooth nesta pagina.', 'blocked');
+    return new LinkError('O navegador bloqueou o Bluetooth nesta página.', 'blocked');
   }
   if (nome === 'NetworkError') {
     return new LinkError('Falha ao conectar no comedouro. Tente de novo.', 'gatt_failed');
@@ -119,18 +129,34 @@ export class WebBleLink implements DeviceLink {
   readonly kind = 'ble' as const;
   readonly label = 'Feed Cat (Bluetooth)';
 
+  /** O comedouro escolhido no seletor. Fica guardado para reconectar sem o seletor. */
   private device: BleDevice | null = null;
   private rx: BleCharacteristic | null = null;
   private tx: BleCharacteristic | null = null;
   private connected = false;
+
+  private readonly assembler = new FrameAssembler();
+
+  /** Fila de escrita: cada mensagem so comeca quando a anterior terminou. */
+  private writeChain: Promise<void> = Promise.resolve();
+  /** Muda a cada sessao; escrita enfileirada numa sessao que caiu desiste. */
+  private session = 0;
+
+  /** true depois de disconnect(): a queda foi pedida, entao nao reconecta. */
+  private userDisconnected = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
 
   private messageHandlers = new Set<DeviceMessageHandler>();
   private connectionHandlers = new Set<ConnectionHandler>();
 
   private readonly onValueChanged = (event: Event) => {
     const alvo = event.target as BleCharacteristic;
-    if (!alvo?.value) return;
-    const texto = new TextDecoder().decode(alvo.value);
+    const view = alvo?.value;
+    if (!view) return;
+    const pacote = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const texto = this.assembler.push(pacote);
+    if (texto === null) return; // pedaco de uma mensagem maior
     // Ruido na linha nunca pode derrubar o app: decodeDeviceMessage devolve
     // null para qualquer coisa que nao siga o protocolo.
     const msg = decodeDeviceMessage(texto);
@@ -138,10 +164,11 @@ export class WebBleLink implements DeviceLink {
   };
 
   private readonly onDisconnected = () => {
-    this.connected = false;
-    this.rx = null;
-    this.tx = null;
-    this.emitConnection(false);
+    const estavaConectado = this.connected;
+    this.dropSession();
+    if (estavaConectado) this.emitConnection(false);
+    // So reconecta sozinho uma sessao que chegou a funcionar e caiu sem ninguem pedir.
+    if (estavaConectado && !this.userDisconnected) this.scheduleReconnect();
   };
 
   isConnected(): boolean {
@@ -151,65 +178,88 @@ export class WebBleLink implements DeviceLink {
   async connect(): Promise<void> {
     const ble = bluetooth();
     if (!ble) {
-      throw new LinkError(
-        'Este navegador nao tem Bluetooth. Use Chrome ou Edge.',
-        'unsupported',
-      );
+      throw new LinkError('Este navegador não tem Bluetooth. Use Chrome ou Edge.', 'unsupported');
     }
     if (this.connected) return;
+
+    this.userDisconnected = false;
+    this.cancelReconnect();
+
+    // Comedouro ja escolhido nesta aba: reconecta direto, sem abrir o seletor.
+    if (this.device?.gatt) {
+      try {
+        await this.openSession();
+        return;
+      } catch {
+        // Nao achou o mesmo aparelho. Esquece ele, para o proximo toque ir
+        // direto ao seletor em vez de repetir esta tentativa.
+        this.closeGattQuietly();
+        this.adoptDevice(null);
+      }
+    }
 
     try {
       // O filtro por servico faz o seletor mostrar so comedouros. O namePrefix
       // entra como segunda opcao para o caso de um firmware antigo que ainda
       // nao anuncia o UUID.
-      this.device = await ble.requestDevice({
+      const escolhido = await ble.requestDevice({
         filters: [{ services: [SERVICE_UUID] }, { namePrefix: DEVICE_NAME_PREFIX }],
         optionalServices: [SERVICE_UUID],
       });
-
-      this.device.addEventListener('gattserverdisconnected', this.onDisconnected);
-
-      const server = await this.device.gatt?.connect();
-      if (!server) throw new LinkError('Comedouro sem GATT.', 'gatt_failed');
-
-      const service = await server.getPrimaryService(SERVICE_UUID);
-      this.rx = await service.getCharacteristic(RX_UUID);
-      this.tx = await service.getCharacteristic(TX_UUID);
-
-      await this.tx.startNotifications();
-      this.tx.addEventListener('characteristicvaluechanged', this.onValueChanged);
-
-      this.connected = true;
-      this.emitConnection(true);
+      this.adoptDevice(escolhido);
+      await this.openSession();
     } catch (err) {
-      await this.cleanup();
+      this.closeGattQuietly();
       throw asLinkError(err);
     }
   }
 
   async disconnect(): Promise<void> {
-    await this.cleanup();
-    if (this.connected) {
-      this.connected = false;
-      this.emitConnection(false);
+    this.userDisconnected = true;
+    this.cancelReconnect();
+    const estavaConectado = this.connected;
+
+    try {
+      this.tx?.removeEventListener('characteristicvaluechanged', this.onValueChanged);
+      await this.tx?.stopNotifications();
+    } catch {
+      // ja desconectado; nao ha o que limpar
     }
+    this.dropSession();
+    this.closeGattQuietly();
+    // O aparelho continua guardado: o proximo Conectar volta nele sem o seletor.
+
+    if (estavaConectado) this.emitConnection(false);
   }
 
   async send(msg: AppMessage): Promise<void> {
-    if (!this.connected || !this.rx) {
-      throw new LinkError('Sem conexao com o comedouro.', 'disconnected');
+    if (!this.connected || !this.rx) throw disconnectedError();
+
+    let pacotes: Uint8Array<ArrayBuffer>[];
+    try {
+      pacotes = encodeFrames(encodeAppMessage(msg), APP_CHUNK_BYTES);
+    } catch (err) {
+      if (err instanceof FrameTooBigError) {
+        throw new LinkError('Mensagem grande demais para o comedouro.', 'too_big');
+      }
+      throw err;
     }
 
-    const bytes = new TextEncoder().encode(encodeAppMessage(msg));
-    if (bytes.length > SAFE_WRITE_BYTES) {
-      console.warn(
-        `[ble] mensagem de ${bytes.length} bytes passa do MTU seguro (${SAFE_WRITE_BYTES}); ` +
-          'pode falhar ou chegar truncada',
-      );
-    }
+    const sessao = this.session;
+    const escrever = async () => {
+      for (const pacote of pacotes) {
+        // A conexao caiu enquanto esta mensagem esperava na fila.
+        if (sessao !== this.session || !this.connected || !this.rx) throw disconnectedError();
+        await this.rx.writeValueWithResponse(pacote);
+      }
+    };
+
+    // Encadeia na fila mesmo que a escrita anterior tenha falhado.
+    const resultado = this.writeChain.then(escrever, escrever);
+    this.writeChain = resultado.catch(() => undefined);
 
     try {
-      await this.rx.writeValueWithResponse(bytes);
+      await resultado;
     } catch (err) {
       throw asLinkError(err);
     }
@@ -227,22 +277,83 @@ export class WebBleLink implements DeviceLink {
 
   // ------------------------------------------------------------- internos
 
-  private async cleanup(): Promise<void> {
-    try {
-      this.tx?.removeEventListener('characteristicvaluechanged', this.onValueChanged);
-      await this.tx?.stopNotifications();
-    } catch {
-      // ja desconectado; nao ha o que limpar
-    }
+  /** Troca o aparelho guardado, movendo o aviso de desconexao junto. */
+  private adoptDevice(device: BleDevice | null): void {
+    if (this.device === device) return;
     this.device?.removeEventListener('gattserverdisconnected', this.onDisconnected);
+    this.device = device;
+    this.device?.addEventListener('gattserverdisconnected', this.onDisconnected);
+  }
+
+  /** Conecta no GATT do aparelho guardado e liga as notificacoes. */
+  private async openSession(): Promise<void> {
+    const gatt = this.device?.gatt;
+    if (!gatt) throw new LinkError('Comedouro sem GATT.', 'gatt_failed');
+
+    const server = await gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    const rx = await service.getCharacteristic(RX_UUID);
+    const tx = await service.getCharacteristic(TX_UUID);
+
+    this.assembler.reset();
+    // addEventListener ignora o mesmo par alvo+funcao repetido, entao reconectar
+    // no mesmo objeto nao duplica as mensagens.
+    tx.addEventListener('characteristicvaluechanged', this.onValueChanged);
+    await tx.startNotifications();
+
+    this.rx = rx;
+    this.tx = tx;
+    this.session++;
+    this.connected = true;
+    this.reconnectAttempts = 0;
+    this.emitConnection(true);
+  }
+
+  /** Esquece a sessao atual: caracteristicas, pedacos pela metade e a fila. */
+  private dropSession(): void {
+    this.connected = false;
+    this.rx = null;
+    this.tx = null;
+    this.session++; // escritas que ainda estao na fila desistem com 'disconnected'
+    this.assembler.reset();
+  }
+
+  private closeGattQuietly(): void {
     try {
       if (this.device?.gatt?.connected) this.device.gatt.disconnect();
     } catch {
-      // idem
+      // ja desconectado
     }
-    this.rx = null;
-    this.tx = null;
-    this.device = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer || this.userDisconnected || !this.device) return;
+    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      console.warn('[ble] desisti de reconectar sozinho; toque em Conectar');
+      return;
+    }
+    const espera = RECONNECT_BACKOFF_MS[this.reconnectAttempts] ?? RECONNECT_MAX_MS;
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.tryReconnect();
+    }, espera);
+  }
+
+  private async tryReconnect(): Promise<void> {
+    if (this.connected || this.userDisconnected || !this.device) return;
+    try {
+      await this.openSession();
+    } catch {
+      this.closeGattQuietly();
+      this.scheduleReconnect();
+    }
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
   }
 
   private emitMessage(msg: DeviceMessage): void {

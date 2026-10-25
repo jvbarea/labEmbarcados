@@ -89,8 +89,8 @@ export default function InicioScreen() {
             Modo adaptação ligado
           </Text>
           <Text className="text-sm text-sky-900 dark:text-sky-100">
-            A porta fica aberta e cada visita é medida. Toque para ver as medições e identificar os
-            gatos.
+            A porta abre para qualquer gato e cada visita é medida. Toque para ver as medições e
+            identificar os gatos.
           </Text>
         </View>
       </Pressable>

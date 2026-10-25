@@ -22,6 +22,7 @@ interface CatsStore {
   load: () => Promise<void>;
   saveCat: (cat: Cat) => Promise<void>;
   getCat: (id: CatId) => Cat | undefined;
+  /** Envia ao comedouro as faixas dos gatos e a copia de nomes/emoji/cores. */
   syncToDevice: () => Promise<void>;
   /**
    * Celular novo ou app reinstalado: puxa de volta o cadastro que esta
@@ -71,7 +72,11 @@ export const useCatsStore = create<CatsStore>((set, get) => ({
   syncToDevice: async () => {
     const { cats, configured } = get();
     if (!configured) return;
-    await useDeviceStore.getState().pushCats(cats);
+    const device = useDeviceStore.getState();
+    await device.pushCats(cats);
+    // Vai junto em toda conexao: um comedouro regravado volta a ter a copia de
+    // seguranca. O firmware ignora (sem gravar na flash) o que nao mudou.
+    await device.pushProfile(encodeProfile(cats));
   },
 
   recoverFromDevice: async () => {

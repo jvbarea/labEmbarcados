@@ -5,8 +5,10 @@ dá para testar tudo sem a maquete e sem a ESP32.
 
 Dois caminhos para cadastrar os gatos:
 
-- **Modo adaptação** (recomendado): a porta fica aberta por alguns dias, os gatos se acostumam com o comedouro e a
-  balança registra o peso de cada visita. Depois o app separa as medições em dois grupos e você só dá nome a cada um.
+- **Modo adaptação** (recomendado): por alguns dias a porta abre para qualquer gato, eles se acostumam com o
+  comedouro e a balança registra o peso de cada visita. Depois o app separa as medições em dois grupos e você só dá
+  nome a cada um. (No simulador a porta fica aberta o tempo todo; no comedouro real, que segura a tampa com o servo,
+  ela abre a cada visita e fecha quando o gato sai.)
 - **Modo manual**: você informa o peso de cada gato.
 
 A faixa de reconhecimento é fixa: **peso ± 500 g**.
@@ -38,7 +40,7 @@ Para parar: `Ctrl+C` no terminal.
 ## 2. Outros comandos
 
 ```powershell
-npm test         # testes do protocolo, das regras e do simulador
+npm test         # protocolo, regras, simulador, fragmentação BLE e mensagens do firmware
 npm run lint     # ESLint
 npm run typecheck # TypeScript sem gerar arquivos
 ```
@@ -53,9 +55,13 @@ pelo navegador. Só em **Chrome ou Edge** — Firefox e Safari não têm a API.
    e deixe a ESP32 ligada.
 2. `npm run web`
 3. Abra **`http://localhost:8081/?ble=1`** no Chrome.
-4. Na tela inicial, toque em **Conectar**. O navegador abre um seletor de
-   dispositivos: escolha `Alimentador`.
-5. Na aba **Comedouro**, os botões de reabastecer e fechar movem o servo.
+4. Toque em **Conectar** (tela inicial, boas-vindas, modo adaptação ou aba
+   Comedouro). O navegador abre um seletor de dispositivos: escolha `Alimentador`.
+5. Ao conectar, o app manda a hora, os tempos, o cadastro dos gatos (faixas e a
+   cópia de nomes/emoji) e puxa o histórico que o comedouro guardou. Se o app
+   ainda não tem gatos e o comedouro tem, o cadastro volta sozinho.
+6. Na aba **Comedouro**, os botões de reabastecer e fechar movem o servo, e o
+   cartão **Balança** tem a tara e a calibração com uma massa conhecida.
 
 Para voltar ao simulador: `http://localhost:8081/?ble=0`. A escolha fica salva
 no `localStorage`, então vale para as recargas seguintes sem o parâmetro.
@@ -63,13 +69,31 @@ no `localStorage`, então vale para as recargas seguintes sem o parâmetro.
 Detalhes que valem saber:
 
 - **O app tenta conectar sozinho ao abrir e falha** — é esperado. O navegador
-  só abre o seletor de dispositivos a partir de um clique, então a conexão
-  precisa vir do botão **Conectar**.
+  só abre o seletor de dispositivos a partir de um clique, então a primeira
+  conexão precisa vir do botão **Conectar**.
+- **Queda de conexão:** o app tenta reconectar sozinho no mesmo comedouro
+  (espera 1, 2, 4, 8 e depois 15 s, até 10 tentativas), sem abrir o seletor. Se
+  desistir, o **Conectar** volta direto no mesmo aparelho; se nem assim achar,
+  o próximo toque abre o seletor de novo.
+- **Mensagens grandes vão em pedaços.** Um pacote BLE leva ~180 bytes, e o
+  `cfgDump` com os nomes dos gatos passa disso. Os dois lados usam o mesmo
+  formato: mensagem que cabe vai inteira (começa com `{`); a maior vai em
+  pedaços com o cabeçalho `#i/n:` (ver `src/device/framing.ts` e o
+  `BleControl` do firmware). As escritas também passam por uma fila, porque o
+  Bluetooth do navegador faz uma operação por vez.
 - O comedouro **não aparece nas configurações de Bluetooth** do Windows, e não
   existe "parear". Só o seletor do navegador enxerga o dispositivo.
-- Nesta fase a balança é **simulada dentro da ESP32**: o peso muda por comando,
-  não por célula de carga. Veja o README do firmware para como injetar peso.
-- `grant` e `revoke` ainda respondem `not_supported` — é a Etapa 3.
+- O firmware pode rodar com a **balança real** (HX711) ou com a **simulada**
+  dentro da ESP32, em que o peso muda por comando. Veja o README do firmware.
+- **Histórico do simulador continua no app.** O que foi gerado no simulador
+  fica salvo neste navegador e aparece junto com as visitas reais quando você
+  troca para `?ble=1` (o app percebe que a numeração do comedouro é outra e
+  sincroniza do zero, mas não apaga nada). Para uma demonstração limpa, use
+  **Comedouro → Apagar dados do app** antes — cuidado: isso também apaga o
+  cadastro dos gatos **no comedouro**, e você cadastra os dois de novo.
+- No modo adaptação o comedouro real **abre a cada visita** (o servo precisa
+  segurar a tampa, então não fica aberto por dias); no simulador a porta fica
+  aberta direto. Os textos do app valem para os dois.
 
 Esse caminho é para desenvolver e demonstrar. O APK da Etapa 4 continua
 precisando de um `BleLink` nativo (`react-native-ble-plx`), que implementa a
@@ -94,7 +118,7 @@ Tudo pelo **painel do simulador**, no fim da aba **Comedouro**.
 | 2 | Cadastrar **Mimi**: nome, emoji, cor, peso `3,2`, acesso **Liberado** | a faixa mostrada fica 2,70 kg — 3,70 kg (margem fixa de ± 500 g) |
 | 3 | Cadastrar **Bolota**: peso `6,5`, acesso **Em dieta** | salva normalmente |
 | 4 | Tentar salvar Bolota com peso `3,4` | aparece o aviso de que a faixa encosta na da Mimi e o botão Salvar fica desabilitado |
-| 4b | **Modo adaptação**: Comedouro → "Abrir modo adaptação" → "Iniciar adaptação" | a porta fica aberta e o Início mostra o aviso azul do modo adaptação |
+| 4b | **Modo adaptação**: Comedouro → "Abrir modo adaptação" → "Iniciar adaptação" | no simulador a porta abre e fica aberta; o Início mostra o aviso azul do modo adaptação |
 | 4c | No painel do simulador: "Gerar medições do modo adaptação" | a tela mostra o histograma, separa dois grupos (~3,2 kg e ~6,5 kg) e deixa nomear cada um |
 | 4d | Nomear os dois grupos e salvar | os gatos são cadastrados com a faixa ± 500 g e o comedouro volta ao modo automático |
 | 5 | Comedouro → simulador → **Mimi** | Início mostra o peso subindo, o nome da Mimi e a porta indo para *Abrindo…* → *Aberta* |
@@ -141,8 +165,8 @@ trocar o simulador pelo Bluetooth real sem reescrever as telas.
 
 ## 7. O que ainda não existe
 
-`BleLink` nativo (para o APK), grants no firmware, célula de carga real, Wi-Fi/MQTT,
-horários por gato e foto do gato.
+`BleLink` nativo (para o APK), Wi-Fi/MQTT, horários por gato e foto do gato.
 
-O Bluetooth pelo navegador **já funciona** — ver §2b. O plano completo está em
+O Bluetooth pelo navegador **já funciona** — ver §2b —, incluindo liberações
+temporárias, modo adaptação e calibração da balança. O plano completo está em
 [`../plano/01-app.md`](../plano/01-app.md).

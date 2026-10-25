@@ -1,0 +1,16 @@
+// Mensagens no formato que o firmware (teste_componentes/teste_esp/firmware_ble) envia.
+// Uma por linha, exatamente como saem do comedouro. Para acrescentar mensagens capturadas
+// da placa, cole o JSON (sem o prefixo "[tx] " do log serial) numa linha nova.
+// Linhas vazias e linhas que comecam com // sao ignoradas.
+{"t":"st","wG":0,"cat":0,"door":"closed","fcC":1,"fcO":0,"grant":null,"mode":"auto","cfgV":12}
+{"t":"st","wG":6512,"cat":2,"door":"open","fcC":0,"fcO":1,"grant":{"cat":2,"visits":1},"mode":"auto","cfgV":12}
+{"t":"st","wG":0,"cat":0,"door":"closed","fcC":1,"fcO":0,"grant":{"cat":2,"untilS":1761400000},"mode":"learn","cfgV":13}
+{"t":"ack","id":3,"ok":true}
+{"t":"ack","id":4,"ok":false,"err":"door_fault"}
+{"t":"cfgDump","cats":[{"k":1,"minG":2700,"maxG":3700,"rule":"allow"},{"k":2,"minG":6000,"maxG":7000,"rule":"deny"}],"confMs":2000,"leaveMs":4000,"maxOpenS":300,"mode":"auto","cfgV":12,"profile":"[{\"id\":1,\"name\":\"Mimi\",\"emoji\":\"🐱\",\"color\":\"laranja\"},{\"id\":2,\"name\":\"Bolota\",\"emoji\":\"🐈\",\"color\":\"azul\"}]"}
+{"t":"ev","seq":41,"ts":1761400123,"kind":"visit","cat":1,"wG":3210,"durS":95,"door":"opened","why":"rule"}
+{"t":"ev","seq":42,"ts":1761400200,"kind":"visit","cat":2,"wG":6480,"durS":30,"door":"opened","why":"learn","learn":1}
+{"t":"ev","seq":43,"ts":1761400300,"kind":"refill","durS":120}
+{"t":"ev","seq":44,"ts":1761400400,"kind":"fault","err":"door_timeout"}
+{"t":"ev","seq":45,"ts":1761400500,"kind":"boot"}
+{"t":"syncEnd","id":7,"last":45}

@@ -357,8 +357,11 @@ export class MockLink implements DeviceLink {
   }
 
   /**
-   * No modo adaptacao a porta fica aberta o tempo todo: os gatos aprendem que
-   * ali tem comida e a balanca so registra quanto cada um pesa.
+   * No simulador, o modo adaptacao deixa a porta aberta o tempo todo: os gatos
+   * aprendem que ali tem comida e a balanca so registra quanto cada um pesa.
+   * O comedouro real segura a tampa com o servo, entao la a porta abre a cada
+   * visita (para qualquer gato) e fecha quando ele sai. Por isso os textos das
+   * telas falam em "abre para qualquer gato", que vale para os dois.
    */
   private setMode(mode: DeviceMode) {
     if (this.mode === mode) return;

@@ -26,6 +26,12 @@ interface EventsStore {
 
   load: () => Promise<void>;
   ingest: (event: EventMsg) => void;
+  /**
+   * O comedouro recomecou a numeracao (ESP regravada, ou troca do simulador
+   * para o aparelho real): passa a sincronizar a partir do ultimo seq dele.
+   * O historico ja guardado no celular fica como esta.
+   */
+  rebase: (lastSeq: number) => void;
   clear: () => Promise<void>;
 }
 
@@ -35,6 +41,15 @@ function prune(events: EventMsg[]): EventMsg[] {
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Grava em lote: chegam dezenas de eventos seguidos numa sincronizacao. */
+function schedulePersist(get: () => EventsStore) {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const state = get();
+    void saveJson(STORAGE_KEYS.events, { events: state.events, lastSeq: state.lastSeq });
+  }, 400);
+}
 
 export const useEventsStore = create<EventsStore>((set, get) => ({
   events: [],
@@ -56,12 +71,12 @@ export const useEventsStore = create<EventsStore>((set, get) => ({
 
     const merged = prune([...events, event].sort((a, b) => a.ts - b.ts || a.seq - b.seq));
     set({ events: merged, lastSeq: Math.max(lastSeq, event.seq) });
+    schedulePersist(get);
+  },
 
-    if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      const state = get();
-      void saveJson(STORAGE_KEYS.events, { events: state.events, lastSeq: state.lastSeq });
-    }, 400);
+  rebase: (lastSeq) => {
+    set({ lastSeq: Math.max(0, lastSeq) });
+    schedulePersist(get);
   },
 
   clear: async () => {

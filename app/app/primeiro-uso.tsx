@@ -1,6 +1,8 @@
 import { Link, useRouter } from 'expo-router';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { BigButton, Card, CatAvatar, Row, SectionTitle, StatusPill } from '../src/ui/components';
+import { OfflineBanner } from '../src/ui/deviceViews';
+import { useAction } from '../src/ui/hooks';
 import { screen } from '../src/ui/tokens';
 import { useCatsStore } from '../src/store/catsStore';
 import { useDeviceStore } from '../src/store/deviceStore';
@@ -10,6 +12,8 @@ export default function PrimeiroUsoScreen() {
   const configured = useCatsStore((s) => s.configured);
   const emAdaptacao = useDeviceStore((s) => s.status?.mode === 'learn');
   const router = useRouter();
+  // O erro de conexao aparece no proprio aviso (connectionError do store).
+  const conexao = useAction();
 
   return (
     <ScrollView className={screen.page} contentContainerClassName={screen.content}>
@@ -21,6 +25,14 @@ export default function PrimeiroUsoScreen() {
           caminhos para começar.
         </Text>
       </Card>
+
+      {/* Conectar antes de tudo: se o comedouro ja tiver um cadastro guardado,
+          ele volta sozinho e esta tela libera o "Começar a usar". */}
+      <OfflineBanner
+        idleText="Conecte ao comedouro. Se ele já tiver os gatos guardados, o cadastro volta sozinho."
+        loading={conexao.isPending('conectar')}
+        onConnect={() => conexao.run('conectar', () => useDeviceStore.getState().connect())}
+      />
 
       <Card className="gap-3 border-2 border-marca-400">
         <Row className="justify-between">
@@ -34,13 +46,13 @@ export default function PrimeiroUsoScreen() {
         </Row>
 
         <Text className={screen.body}>
-          A porta fica aberta por alguns dias: os gatos se acostumam com o comedouro e a balança
-          registra o peso de cada visita. Depois o app separa as medições em dois grupos e você só dá
-          nome a cada um.
+          Por alguns dias a porta abre para qualquer gato: eles se acostumam com o comedouro e a
+          balança registra o peso de cada visita. Depois o app separa as medições em dois grupos e
+          você só dá nome a cada um.
         </Text>
 
         <View className="gap-1 rounded-xl bg-slate-100 p-3 dark:bg-slate-800">
-          <Text className={screen.hint}>1. Ligue o modo adaptação e deixe o comedouro aberto</Text>
+          <Text className={screen.hint}>1. Ligue o modo adaptação: a porta abre para todos</Text>
           <Text className={screen.hint}>2. Os gatos comem e a balança anota cada visita</Text>
           <Text className={screen.hint}>3. O app identifica os dois e você dá os nomes</Text>
         </View>

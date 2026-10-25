@@ -1,9 +1,14 @@
 /**
  * Conexao com o comedouro, status ao vivo e envio de comandos com confirmacao.
  *
- * As telas usam este store; ele fala com o DeviceLink (simulador hoje, BLE
- * depois). Todo comando espera o "ack" com o mesmo id e tem timeout, para a
- * tela nunca ficar pendurada.
+ * As telas usam este store; ele fala com o DeviceLink (simulador ou BLE). Todo
+ * comando espera o "ack" com o mesmo id e tem timeout, para a tela nunca ficar
+ * pendurada.
+ *
+ * Toda conexao que da certo - botao Conectar de qualquer tela, o auto-connect
+ * do bootstrap ou a reconexao automatica do transporte - passa pelo mesmo
+ * preparo: hello -> cfg -> sync, e depois os ganchos registrados com
+ * onDeviceReady (o bootstrap registra "recuperar cadastro e reenviar os gatos").
  */
 
 import { create } from 'zustand';
@@ -71,6 +76,8 @@ interface DeviceStore {
   refill: (seconds: number) => Promise<void>;
   closeDoor: () => Promise<void>;
   tare: () => Promise<void>;
+  /** Calibra a balanca com uma massa conhecida (em gramas) no centro da plataforma. */
+  calibrate: (refG: number) => Promise<void>;
   setSettings: (settings: DeviceSettings) => Promise<void>;
   setMode: (mode: DeviceMode) => Promise<void>;
   /** Le do comedouro o que ele tem guardado na flash. */
@@ -100,6 +107,69 @@ function settleAck(ack: AckMsg) {
   clearTimeout(entry.timer);
   pending.delete(ack.id);
   entry.resolve(ack);
+}
+
+// ------------------------------------------------------------ pos-conexao
+
+export type DeviceReadyHook = () => Promise<void>;
+
+const readyHooks = new Set<DeviceReadyHook>();
+
+/**
+ * Registra algo para rodar depois de cada conexao preparada (hello, cfg e
+ * sync ja confirmados). Devolve a funcao que cancela o registro.
+ */
+export function onDeviceReady(hook: DeviceReadyHook): () => void {
+  readyHooks.add(hook);
+  return () => {
+    readyHooks.delete(hook);
+  };
+}
+
+/** Preparo em andamento; impede dois preparos ao mesmo tempo. */
+let preparing: Promise<void> | null = null;
+
+/**
+ * hello -> cfg -> sync, e depois os ganchos. Erro num gancho nao derruba a
+ * conexao: fica no console e os outros ganchos continuam.
+ */
+function prepareSession(): Promise<void> {
+  if (preparing) return preparing;
+
+  preparing = (async () => {
+    const store = useDeviceStore.getState();
+    await store.send({ t: 'hello', v: PROTOCOL_VERSION, now: nowS() });
+    await store.setSettings(store.settings);
+    await store.send({ t: 'sync', since: useEventsStore.getState().lastSeq });
+
+    for (const hook of readyHooks) {
+      try {
+        await hook();
+      } catch (err) {
+        console.warn('[device] tarefa pos-conexao falhou:', err);
+      }
+    }
+  })().finally(() => {
+    preparing = null;
+  });
+
+  return preparing;
+}
+
+/**
+ * O comedouro diz que o ultimo evento dele e "last", mas o app ja viu um seq
+ * maior: a contagem voltou (ESP regravada, ou troca do simulador para o
+ * aparelho real no mesmo navegador). Sem isso, o app pediria "since" um numero
+ * que o comedouro so alcancaria daqui a muito tempo e nada mais sincronizaria.
+ */
+function handleSyncEnd(last: number) {
+  const events = useEventsStore.getState();
+  if (last >= events.lastSeq) return;
+  events.rebase(last);
+  void useDeviceStore
+    .getState()
+    .send({ t: 'sync', since: 0 })
+    .catch(() => undefined);
 }
 
 export const useDeviceStore = create<DeviceStore>((set, get) => ({
@@ -138,6 +208,7 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
             break;
           case 'syncEnd':
             settleAck({ t: 'ack', id: msg.id, ok: true });
+            handleSyncEnd(msg.last);
             break;
         }
       }),
@@ -145,17 +216,25 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
 
     unsubscribers.push(
       link.onConnectionChange((connected) => {
-        set({
-          connection: connected ? 'connected' : 'idle',
-          status: connected ? get().status : null,
-        });
-        if (!connected) {
-          pending.forEach((entry) => {
-            clearTimeout(entry.timer);
-            entry.reject(new Error(describeError('disconnected')));
+        if (connected) {
+          // connect() esta no meio do caminho e faz o preparo ele mesmo.
+          if (get().connection === 'connecting') return;
+
+          // Reconexao feita pelo proprio transporte (queda e volta do BLE):
+          // prepara a sessao como se o usuario tivesse tocado em Conectar.
+          set({ connection: 'connected', connectionError: null });
+          prepareSession().catch((err) => {
+            console.warn('[device] preparo da reconexao falhou:', err);
           });
-          pending.clear();
+          return;
         }
+
+        set({ connection: 'idle', status: null });
+        pending.forEach((entry) => {
+          clearTimeout(entry.timer);
+          entry.reject(new Error(describeError('disconnected')));
+        });
+        pending.clear();
       }),
     );
   },
@@ -166,11 +245,7 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
     try {
       await link.connect();
       set({ connection: 'connected' });
-
-      await get().send({ t: 'hello', v: PROTOCOL_VERSION, now: nowS() });
-      await get().setSettings(get().settings);
-      const events = useEventsStore.getState();
-      await get().send({ t: 'sync', since: events.lastSeq });
+      await prepareSession();
     } catch (err) {
       set({
         connection: 'error',
@@ -234,6 +309,10 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
 
   tare: async () => {
     await get().send({ t: 'cmd', op: 'tare' });
+  },
+
+  calibrate: async (refG) => {
+    await get().send({ t: 'cmd', op: 'calibrate', refG: Math.round(refG) });
   },
 
   setSettings: async (settings) => {

@@ -2,10 +2,24 @@
 
 import { useEffect, useState } from 'react';
 import { useCatsStore } from './catsStore';
-import { simulator, useDeviceStore } from './deviceStore';
+import { onDeviceReady, simulator, useDeviceStore } from './deviceStore';
 import { useEventsStore } from './eventsStore';
 
 let started = false;
+
+/**
+ * Roda depois de TODA conexao preparada, qualquer que seja o caminho: o
+ * auto-connect daqui, o botao Conectar de qualquer tela, ou a reconexao
+ * automatica do Bluetooth.
+ */
+async function aposConectar() {
+  // App recem-instalado (ou celular novo): tenta puxar o cadastro que o
+  // comedouro guarda na flash antes de pedir tudo de novo ao usuario.
+  if (!useCatsStore.getState().configured) {
+    await useCatsStore.getState().recoverFromDevice();
+  }
+  await useCatsStore.getState().syncToDevice();
+}
 
 export function useBootstrap(): boolean {
   const [ready, setReady] = useState(false);
@@ -17,6 +31,7 @@ export function useBootstrap(): boolean {
       if (!started) {
         started = true;
         useDeviceStore.getState().init();
+        onDeviceReady(aposConectar);
       }
       await Promise.all([
         useCatsStore.getState().load(),
@@ -27,14 +42,9 @@ export function useBootstrap(): boolean {
       setReady(true);
 
       try {
+        // No Bluetooth pelo navegador isto falha de proposito (o seletor exige
+        // um toque); a conexao vem do botao Conectar.
         await useDeviceStore.getState().connect();
-
-        // App recem-instalado (ou celular novo): tenta puxar o cadastro que
-        // o comedouro guarda na flash antes de pedir tudo de novo ao usuario.
-        if (!useCatsStore.getState().configured) {
-          await useCatsStore.getState().recoverFromDevice();
-        }
-        await useCatsStore.getState().syncToDevice();
 
         // No simulador, se nao ha nada guardado ainda, semeia alguns dias de
         // visitas (incluindo hoje) para as telas nao nascerem vazias.

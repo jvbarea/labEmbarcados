@@ -2,7 +2,7 @@ import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { BigButton, Card, CatAvatar, KeyValue, Row, SectionTitle, StatusPill } from '../src/ui/components';
-import { FeedbackBanner } from '../src/ui/deviceViews';
+import { FeedbackBanner, OfflineBanner } from '../src/ui/deviceViews';
 import { useAction } from '../src/ui/hooks';
 import { screen } from '../src/ui/tokens';
 import { simulator, useDeviceStore } from '../src/store/deviceStore';
@@ -19,6 +19,7 @@ export default function AdaptacaoScreen() {
   const events = useEventsStore((s) => s.events);
   const cats = useCatsStore((s) => s.cats);
   const { run, feedback, isPending } = useAction();
+  const conexao = useAction();
   const sim = simulator();
 
   const amostras = useMemo(() => learningSamples(events), [events]);
@@ -60,13 +61,20 @@ export default function AdaptacaoScreen() {
 
   return (
     <ScrollView className={screen.page} contentContainerClassName={screen.content}>
+      {/* o erro de conexao aparece no proprio aviso, por isso usa outro useAction */}
+      <OfflineBanner
+        idleText="Conecte ao comedouro para ligar ou desligar o modo adaptação."
+        loading={conexao.isPending('conectar')}
+        onConnect={() => conexao.run('conectar', () => useDeviceStore.getState().connect())}
+      />
+
       <FeedbackBanner feedback={feedback} />
 
       <Card className="gap-3">
         <Row className="justify-between">
           <SectionTitle
             className="flex-1 pr-2"
-            hint="A porta fica aberta e a balança só anota quem sobe"
+            hint="A porta abre para qualquer gato e a balança anota quem sobe"
           >
             Modo adaptação
           </SectionTitle>
@@ -78,9 +86,9 @@ export default function AdaptacaoScreen() {
         </Row>
 
         <Text className={screen.body}>
-          Deixe o comedouro aberto por alguns dias. Os gatos aprendem que ali tem comida e a balança
-          registra o peso de cada visita. Depois o app separa as medições em dois grupos e você dá
-          nome a cada um — sem precisar pesar os gatos na mão.
+          Deixe o comedouro neste modo por alguns dias. A porta abre para qualquer gato, eles
+          aprendem que ali tem comida e a balança registra o peso de cada visita. Depois o app separa
+          as medições em dois grupos e você dá nome a cada um — sem precisar pesar os gatos na mão.
         </Text>
 
         {emAdaptacao ? (
@@ -108,7 +116,7 @@ export default function AdaptacaoScreen() {
               run(
                 'modo',
                 () => useDeviceStore.getState().setMode('learn'),
-                'Modo adaptação ligado: a porta fica aberta e as visitas são registradas.',
+                'Modo adaptação ligado: a porta abre para qualquer gato e as visitas são registradas.',
               )
             }
           />

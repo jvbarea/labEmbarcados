@@ -19,17 +19,27 @@ export function ConnectionPill() {
   return <StatusPill label={look.label} tone={look.tone} icon="bluetooth" />;
 }
 
-/** Barra que aparece quando nao ha conexao, com botao para tentar de novo. */
-export function OfflineBanner({ onConnect, loading }: { onConnect: () => void; loading?: boolean }) {
+/**
+ * Barra que aparece quando nao ha conexao, com botao para tentar de novo.
+ * `idleText` troca a frase padrao (quando nao houve erro) por uma que faca
+ * sentido na tela em que o aviso aparece.
+ */
+export function OfflineBanner({
+  onConnect,
+  loading,
+  idleText = 'Sem conexão com o comedouro. Os dados abaixo são os últimos conhecidos.',
+}: {
+  onConnect: () => void;
+  loading?: boolean;
+  idleText?: string;
+}) {
   const connection = useDeviceStore((s) => s.connection);
   const error = useDeviceStore((s) => s.connectionError);
   if (connection === 'connected' || connection === 'connecting') return null;
 
   return (
     <View className="gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
-      <Text className="text-sm text-amber-900 dark:text-amber-100">
-        {error ?? 'Sem conexão com o comedouro. Os dados abaixo são os últimos conhecidos.'}
-      </Text>
+      <Text className="text-sm text-amber-900 dark:text-amber-100">{error ?? idleText}</Text>
       <BigButton title="Conectar" icon="bluetooth" onPress={onConnect} loading={loading} />
     </View>
   );

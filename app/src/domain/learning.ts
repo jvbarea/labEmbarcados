@@ -1,8 +1,8 @@
 /**
  * Modo adaptacao: separar as medicoes de peso em dois gatos.
  *
- * No modo adaptacao a porta fica aberta e o comedouro so anota quanto pesava
- * quem subiu na balanca. Depois de alguns dias, estas funcoes separam as
+ * No modo adaptacao a porta abre para qualquer gato e o comedouro so anota
+ * quanto pesava quem subiu na balanca. Depois de alguns dias, estas funcoes separam as
  * medicoes em dois grupos (os dois gatos) para o usuario dar nome a cada um.
  *
  * A separacao usa k-means de uma dimensao com k=2 — e a versao mais simples que

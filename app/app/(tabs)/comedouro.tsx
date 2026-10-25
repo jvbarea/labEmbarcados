@@ -1,6 +1,6 @@
 import { Link, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { BigButton, Card, KeyValue, Row, SectionTitle, StatusPill } from '../../src/ui/components';
 import { ConnectionPill, FeedbackBanner } from '../../src/ui/deviceViews';
 import { useAction } from '../../src/ui/hooks';
@@ -10,6 +10,19 @@ import { useCatsStore } from '../../src/store/catsStore';
 import { useEventsStore } from '../../src/store/eventsStore';
 import { formatDuration, formatKg } from '../../src/domain/format';
 
+/** Faixa aceita para a massa de referencia da calibracao, em gramas. */
+const MASSA_REF_MIN_G = 50;
+const MASSA_REF_MAX_G = 20000;
+
+/** Le o campo da massa de referencia (gramas inteiras); null quando nao vale. */
+function lerMassaRef(texto: string): number | null {
+  const limpo = texto.trim();
+  if (!/^\d+$/.test(limpo)) return null;
+  const gramas = Number(limpo);
+  if (gramas < MASSA_REF_MIN_G || gramas > MASSA_REF_MAX_G) return null;
+  return gramas;
+}
+
 export default function ComedouroScreen() {
   const status = useDeviceStore((s) => s.status);
   const connection = useDeviceStore((s) => s.connection);
@@ -18,6 +31,9 @@ export default function ComedouroScreen() {
   const eventos = useEventsStore((s) => s.events.length);
   const { run, feedback, isPending } = useAction();
   const [confirmandoReset, setConfirmandoReset] = useState(false);
+  const [massaRef, setMassaRef] = useState('');
+  const massaRefG = lerMassaRef(massaRef);
+  const massaRefInvalida = massaRef.trim().length > 0 && massaRefG === null;
   const sim = simulator();
   const router = useRouter();
   const porta = doorLook[status?.door ?? 'closed'];
@@ -49,10 +65,8 @@ export default function ComedouroScreen() {
             icon="bluetooth"
             loading={isPending('conectar')}
             onPress={() =>
-              run('conectar', async () => {
-                await useDeviceStore.getState().connect();
-                await useCatsStore.getState().syncToDevice();
-              })
+              // connect() ja reenvia o cadastro dos gatos (ver onDeviceReady no bootstrap)
+              run('conectar', () => useDeviceStore.getState().connect())
             }
           />
         )}
@@ -71,7 +85,7 @@ export default function ComedouroScreen() {
         </Row>
         <Text className={screen.hint}>
           {emAdaptacao
-            ? 'Porta aberta o tempo todo, registrando o peso de quem sobe na balança. Nenhum gato é bloqueado.'
+            ? 'A porta abre para qualquer gato e o peso de cada visita é registrado. Nenhum gato é bloqueado.'
             : 'A porta abre só para quem pode comer, seguindo o cadastro dos gatos e as liberações.'}
         </Text>
         <Link href="/adaptacao" asChild>
@@ -104,8 +118,10 @@ export default function ComedouroScreen() {
         ) : null}
       </Card>
 
-      <Card className="gap-2">
-        <SectionTitle hint="Zere com a balança vazia">Balança</SectionTitle>
+      <Card className="gap-3">
+        <SectionTitle hint="Zere com a balança vazia e calibre com uma massa conhecida">
+          Balança
+        </SectionTitle>
         <KeyValue label="Leitura atual" value={formatKg(status?.wG ?? 0)} />
         <BigButton
           title="Zerar (tara)"
@@ -115,6 +131,53 @@ export default function ComedouroScreen() {
           disabled={!conectado}
           onPress={() => run('tara', () => useDeviceStore.getState().tare(), 'Balança zerada.')}
         />
+
+        <View className="h-px bg-slate-200 dark:bg-slate-800" />
+
+        <Text className={screen.label}>Calibrar com uma massa conhecida</Text>
+        <View className="gap-1">
+          <Text className={screen.hint}>1. Com a plataforma vazia, toque em Zerar (tara).</Text>
+          <Text className={screen.hint}>
+            2. Coloque no centro da plataforma algo de peso conhecido (uma garrafa d’água cheia
+            serve).
+          </Text>
+          <Text className={screen.hint}>3. Digite a massa em gramas e toque em Calibrar.</Text>
+        </View>
+        <Row>
+          <TextInput
+            className={`flex-1 ${screen.input}`}
+            value={massaRef}
+            onChangeText={setMassaRef}
+            keyboardType="number-pad"
+            inputMode="numeric"
+            placeholder="Massa em gramas, ex.: 696"
+            placeholderTextColor="#94a3b8"
+            maxLength={6}
+            accessibilityLabel="Massa de referência em gramas"
+          />
+          <BigButton
+            title="Calibrar"
+            icon="scale"
+            loading={isPending('calibrar')}
+            disabled={!conectado || massaRefG === null}
+            onPress={() => {
+              if (massaRefG === null) return;
+              void run(
+                'calibrar',
+                async () => {
+                  await useDeviceStore.getState().calibrate(massaRefG);
+                  setMassaRef('');
+                },
+                `Balança calibrada com ${massaRefG} g. Confira a leitura com a massa ainda em cima.`,
+              );
+            }}
+          />
+        </Row>
+        {massaRefInvalida ? (
+          <Text className={screen.error}>
+            {`Use gramas inteiras, entre ${MASSA_REF_MIN_G} g e ${MASSA_REF_MAX_G / 1000} kg.`}
+          </Text>
+        ) : null}
       </Card>
 
       <Card className="gap-3">

@@ -25,7 +25,10 @@ export type DecisionReason = 'rule' | 'grant' | 'unknown' | 'manual' | 'learn';
 /**
  * Modo de operacao do comedouro.
  *  - 'auto'  : regra normal (abre so para quem pode)
- *  - 'learn' : modo adaptacao/identificacao, porta aberta e balanca so registrando
+ *  - 'learn' : modo adaptacao/identificacao: ninguem e bloqueado e cada visita
+ *              vira uma amostra de peso. O simulador deixa a porta aberta o
+ *              tempo todo; o comedouro real, cujo servo precisa segurar a
+ *              tampa, abre a cada visita e fecha quando o gato sai.
  */
 export type DeviceMode = 'auto' | 'learn';
 
@@ -266,22 +269,41 @@ export function decodeDeviceMessage(raw: string): DeviceMessage | null {
   }
 }
 
-/** Mensagens de erro do dispositivo traduzidas para a tela. */
+/**
+ * Mensagens de erro traduzidas para a tela. Cobre os codigos que o firmware
+ * manda em ack.err e ev.err (teste_componentes/teste_esp/firmware_ble) e os do
+ * proprio app (timeout, disconnected).
+ */
+const ERROR_TEXT: Record<string, string> = {
+  // porta
+  door_fault: 'A porta está em falha. Rearme pela aba Comedouro.',
+  door_timeout: 'A porta não chegou ao fim do curso a tempo.',
+  door_moving: 'Espere a porta parar e tente de novo.',
+  // balança
+  sensor_fault: 'A balança parou de responder. Confira os fios do HX711.',
+  scale_mute: 'A balança não respondeu. Confira os fios do HX711.',
+  calib_failed: 'A calibração falhou. A massa de referência está no centro da plataforma?',
+  no_scale: 'Esta balança é simulada; não há o que calibrar.',
+  missing_ref: 'Informe a massa de referência em gramas.',
+  real_scale: 'Este comedouro usa a balança real; o peso não pode ser simulado.',
+  // cadastro e configuração
+  unknown_cat: 'O comedouro não conhece esse gato. Envie o cadastro de novo.',
+  no_clock: 'O comedouro ainda está sem hora. Reconecte e tente de novo.',
+  bad_range: 'Valor fora da faixa aceita pelo comedouro.',
+  bad_cats: 'O cadastro dos gatos chegou incompleto. Envie de novo.',
+  too_big: 'A mensagem ficou grande demais para o comedouro.',
+  // protocolo
+  bad_json: 'O comedouro recebeu uma mensagem corrompida. Tente de novo.',
+  bad_type: 'O comedouro não reconheceu o comando. O firmware está atualizado?',
+  bad_op: 'O comedouro não reconheceu o comando. O firmware está atualizado?',
+  bad_cmd: 'O comedouro não reconheceu o comando. O firmware está atualizado?',
+  // app
+  busy: 'O comedouro está ocupado com outro comando.',
+  timeout: 'O comedouro não respondeu.',
+  disconnected: 'Sem conexão com o comedouro.',
+};
+
 export function describeError(err: string | undefined): string {
-  switch (err) {
-    case 'door_timeout':
-      return 'A porta nao chegou ao fim de curso a tempo.';
-    case 'door_fault':
-      return 'A porta esta em falha. Rearme pela aba Comedouro.';
-    case 'unknown_cat':
-      return 'O comedouro nao conhece esse gato. Envie o cadastro de novo.';
-    case 'busy':
-      return 'O comedouro esta ocupado com outro comando.';
-    case 'timeout':
-      return 'O comedouro nao respondeu.';
-    case 'disconnected':
-      return 'Sem conexao com o comedouro.';
-    default:
-      return 'Nao foi possivel completar a acao.';
-  }
+  if (!err) return 'Não foi possível completar a ação.';
+  return ERROR_TEXT[err] ?? `Não foi possível completar a ação (${err}).`;
 }

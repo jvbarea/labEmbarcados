@@ -11,6 +11,8 @@ AppConfig Storage::loadAppConfig() {
   cfg.maxOpenS      = prefs.getUInt("maxOpenS", cfg.maxOpenS);
   cfg.doorClosedDeg = prefs.getInt("dClose", cfg.doorClosedDeg);
   cfg.doorOpenDeg   = prefs.getInt("dOpen", cfg.doorOpenDeg);
+  cfg.servoUs0      = prefs.getInt("sUs0", cfg.servoUs0);
+  cfg.servoUs90     = prefs.getInt("sUs90", cfg.servoUs90);
   cfg.learnMode     = prefs.getBool("learn", cfg.learnMode);
   cfg.cfgV          = prefs.getUInt("cfgV", cfg.cfgV);
   cfg.benchMinG     = prefs.getFloat("wMin", cfg.benchMinG);
@@ -38,6 +40,8 @@ void Storage::saveAppConfig(AppConfig &cfg) {
   prefs.putUInt("maxOpenS", cfg.maxOpenS);
   prefs.putInt("dClose", cfg.doorClosedDeg);
   prefs.putInt("dOpen", cfg.doorOpenDeg);
+  prefs.putInt("sUs0", cfg.servoUs0);
+  prefs.putInt("sUs90", cfg.servoUs90);
   prefs.putBool("learn", cfg.learnMode);
   prefs.putUInt("cfgV", cfg.cfgV);
   prefs.putFloat("wMin", cfg.benchMinG);

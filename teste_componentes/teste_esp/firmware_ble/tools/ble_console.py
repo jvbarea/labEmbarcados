@@ -1,152 +1,137 @@
 """
-Console BLE do Alimentador — conecta pelo PC, sem precisar do celular.
+Console BLE do Alimentador: conecta pelo PC, sem precisar do celular, e fala o
+protocolo Feed Cat v2 (mensagens grandes em pedacos, como o app).
 
     pip install bleak
-    python tools/ble_console.py           # interativo
-    python tools/ble_console.py --demo    # roteiro automatico, para conferir que tudo responde
+    python tools/ble_console.py
 
-Atalhos no modo interativo (ou mande JSON cru, que vai direto):
+Atalhos (ou mande JSON cru, que vai direto; o "id" e posto sozinho):
 
-    w 4200        coloca 4200 g na balanca mockada
-    open / close  abre / fecha a porta
-    reset         rearma depois de falha
-    status        pede o status agora
-    events        historico
-    cfg 3000 8000        janela de peso, em gramas
-    door 0 90            posicoes da porta, em graus
-    sensor off|on        simula sensor mudo
-    quiet         liga/desliga a impressao do status de 1 em 1 s
-    q             sai
+    hello                 manda a hora do PC (faca primeiro: sem isso os eventos ficam sem hora)
+    w 4200                coloca 4200 g na balanca simulada (so no 'pio run -e mock')
+    refill [s]            abre para reabastecer (padrao 60 s)
+    close                 fecha (com a porta em falha, rearma)
+    reset                 rearme de bancada da maquina de estados
+    status                pede o status agora
+    sync [desde]          historico a partir de um seq (padrao 0)
+    cfgget                o que esta gravado: gatos, tempos, modo, perfil
+    grant <gato> <min>    libera o gato por <min> minutos
+    grantv <gato> <n>     libera o gato por <n> visitas
+    revoke <gato>         cancela a liberacao
+    learn / auto          modo adaptacao / automatico
+    times <conf> <leave> <maxOpenS>   tempos (ms, ms, s)
+    bench <min> <max>     janela de bancada em gramas (so vale sem gatos cadastrados)
+    door <fechada> <aberta>           posicoes da porta, em graus
+    sensor off|on         simula sensor mudo (balanca simulada)
+    evtrim <seq>          apaga do historico os eventos depois deste seq
+    quiet                 liga/desliga a impressao do status (sai a cada 500 ms)
+    q                     sai
 """
 import asyncio
-import sys
+import json
+import time
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
-DEVICE_NAME = "Alimentador"
-RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # app -> ESP (write)
-TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # ESP -> app (notify)
+from feedcat_ble import Feeder, find_device
 
-quiet_status = False
-msg_id = 0
+quiet_status = True
 
 
-def next_id():
-    global msg_id
-    msg_id += 1
-    return msg_id
-
-
-def on_notify(_, data: bytearray):
-    txt = data.decode("utf-8", "replace")
-    if quiet_status and '"t":"st"' in txt:
+def mostra(texto, msg):
+    if quiet_status and isinstance(msg, dict) and msg.get("t") == "st":
         return
-    print("   <-", txt)
+    print("   <-", texto)
 
 
-def to_json(line: str):
-    """Traduz um atalho em JSON do protocolo. None = linha vazia."""
-    line = line.strip()
-    if not line:
+def traduz(linha: str):
+    """Atalho -> dict do protocolo. None = nada a mandar."""
+    linha = linha.strip()
+    if not linha:
         return None
-    if line.startswith("{"):
-        return line  # JSON cru passa direto
+    if linha.startswith("{"):
+        return json.loads(linha)
 
-    parts = line.split()
-    cmd, args = parts[0].lower(), parts[1:]
-    i = next_id()
+    partes = linha.split()
+    cmd, args = partes[0].lower(), partes[1:]
 
-    if cmd in ("open", "close", "reset", "status"):
-        return '{"t":"cmd","id":%d,"c":"%s"}' % (i, cmd)
+    def n(i, padrao=None):
+        return int(args[i]) if len(args) > i else padrao
+
+    if cmd == "hello":
+        return {"t": "hello", "v": 2, "now": int(time.time())}
     if cmd == "w" and args:
-        return '{"t":"cmd","id":%d,"c":"mock","wG":%s}' % (i, args[0])
-    if cmd == "events":
-        return '{"t":"get","id":%d,"w":"events"}' % i
-    if cmd == "sensor" and args:
-        ok = "false" if args[0].lower() in ("off", "0", "false") else "true"
-        return '{"t":"cmd","id":%d,"c":"sensor","ok":%s}' % (i, ok)
-    if cmd == "cfg" and len(args) >= 2:
-        return '{"t":"cfg","id":%d,"minG":%s,"maxG":%s}' % (i, args[0], args[1])
+        return {"t": "cmd", "c": "mock", "wG": float(args[0])}
+    if cmd == "refill":
+        return {"t": "cmd", "op": "refill", "timeoutS": n(0, 60)}
+    if cmd == "close":
+        return {"t": "cmd", "op": "close"}
+    if cmd in ("reset", "status"):
+        return {"t": "cmd", "c": cmd}
+    if cmd == "sync":
+        return {"t": "sync", "since": n(0, 0)}
+    if cmd == "cfgget":
+        return {"t": "cfgGet"}
+    if cmd == "grant" and len(args) >= 2:
+        return {"t": "grant", "cat": n(0), "untilS": int(time.time()) + 60 * n(1)}
+    if cmd == "grantv" and len(args) >= 2:
+        return {"t": "grant", "cat": n(0), "visits": n(1)}
+    if cmd == "revoke" and args:
+        return {"t": "revoke", "cat": n(0)}
+    if cmd in ("learn", "auto"):
+        return {"t": "mode", "mode": cmd}
+    if cmd == "times" and len(args) >= 3:
+        return {"t": "cfg", "confMs": n(0), "leaveMs": n(1), "maxOpenS": n(2)}
+    if cmd == "bench" and len(args) >= 2:
+        return {"t": "cfg", "minG": n(0), "maxG": n(1)}
     if cmd == "door" and len(args) >= 2:
-        return '{"t":"cfg","id":%d,"closedDeg":%s,"openDeg":%s}' % (i, args[0], args[1])
+        return {"t": "cfg", "closedDeg": n(0), "openDeg": n(1)}
+    if cmd == "sensor" and args:
+        return {"t": "cmd", "c": "sensor", "ok": args[0].lower() not in ("off", "0", "false")}
+    if cmd == "evtrim" and args:
+        return {"t": "cmd", "c": "evtrim", "after": n(0)}
 
-    print("   [?] atalho desconhecido:", cmd)
+    print("   [?] atalho desconhecido:", cmd, "- digite ? para a lista")
     return None
 
 
-async def connect():
-    print(f"procurando '{DEVICE_NAME}'...")
-    dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=12.0)
-    if dev is None:
-        print(f"nao encontrei '{DEVICE_NAME}'. A ESP32 esta ligada e rodando este firmware?")
-        return None
-    print(f"achei em {dev.address}, conectando...")
-    return dev
-
-
-async def run_demo(client):
-    async def send(js, wait=3.5):
-        print("   ->", js)
-        await client.write_gatt_char(RX, js.encode(), response=True)
-        await asyncio.sleep(wait)
-
-    print("\n--- restaura a janela padrao ---")
-    await send('{"t":"cfg","id":1,"minG":3000,"maxG":8000}', 2.0)
-    print("\n--- gato de 4200 g sobe (dentro da janela) ---")
-    await send('{"t":"cmd","id":2,"c":"mock","wG":4200}', 4.0)
-    print("\n--- gato desce ---")
-    await send('{"t":"cmd","id":3,"c":"mock","wG":0}', 4.0)
-    print("\n--- peso fora da janela ---")
-    await send('{"t":"cmd","id":4,"c":"mock","wG":12000}', 3.5)
-    await send('{"t":"cmd","id":5,"c":"mock","wG":0}', 4.0)
-    print("\n--- historico ---")
-    await send('{"t":"get","id":6,"w":"events"}', 3.0)
-
-
-async def run_interactive(client):
-    global quiet_status
-    loop = asyncio.get_running_loop()
-    print("\nconectado. digite '?' para os atalhos, 'q' para sair.\n")
-
-    while True:
-        line = await loop.run_in_executor(None, lambda: input("> "))
-        line = line.strip()
-
-        if line.lower() in ("q", "quit", "exit"):
-            break
-        if line == "?":
-            print(__doc__)
-            continue
-        if line.lower() == "quiet":
-            quiet_status = not quiet_status
-            print(f"   [i] status de 1 em 1 s {'oculto' if quiet_status else 'visivel'}")
-            continue
-
-        js = to_json(line)
-        if js is None:
-            continue
-        print("   ->", js)
-        await client.write_gatt_char(RX, js.encode(), response=True)
-        await asyncio.sleep(0.4)
-
-
 async def main():
-    demo = "--demo" in sys.argv
-
-    dev = await connect()
+    global quiet_status
+    dev = await find_device()
     if dev is None:
         return
+    print(f"conectando em {dev.address}...")
 
     async with BleakClient(dev) as client:
-        print("conectado:", client.is_connected)
-        await client.start_notify(TX, on_notify)
+        f = Feeder(client)
+        f.on_message = mostra
+        await f.start()
+        print(f"conectado (MTU {f.mtu}). '?' mostra os atalhos, 'q' sai. Comece com 'hello'.\n")
+        loop = asyncio.get_running_loop()
         try:
-            if demo:
-                await run_demo(client)
-            else:
-                await run_interactive(client)
+            while True:
+                linha = (await loop.run_in_executor(None, lambda: input("> "))).strip()
+                if linha.lower() in ("q", "quit", "exit"):
+                    break
+                if linha == "?":
+                    print(__doc__)
+                    continue
+                if linha.lower() == "quiet":
+                    quiet_status = not quiet_status
+                    print(f"   [i] status {'oculto' if quiet_status else 'visivel'}")
+                    continue
+                try:
+                    msg = traduz(linha)
+                except (ValueError, json.JSONDecodeError) as erro:
+                    print("   [erro]", erro)
+                    continue
+                if msg is None:
+                    continue
+                mid = await f.send(msg)
+                print(f"   -> {json.dumps({**msg, 'id': mid}, ensure_ascii=False)}")
+                await asyncio.sleep(0.4)
         finally:
-            await client.stop_notify(TX)
+            await f.stop()
     print("desconectado.")
 
 

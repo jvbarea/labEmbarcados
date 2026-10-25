@@ -31,6 +31,12 @@ struct AppConfig {
   int doorClosedDeg = DEFAULT_DOOR_CLOSED_DEG;
   int doorOpenDeg   = DEFAULT_DOOR_OPEN_DEG;
 
+  // Calibracao do SERVO: pulsos em que o eixo esta fisicamente em 0 e em 90
+  // graus. Medidos em bancada com transferidor (comandos set0 e set90). Os
+  // padroes sao a faixa nominal da familia, nao uma medida do nosso servo.
+  int servoUs0  = DEFAULT_SERVO_US_AT_0DEG;
+  int servoUs90 = DEFAULT_SERVO_US_AT_90DEG;
+
   bool learnMode = false;   // modo "learn" do protocolo v2
 
   // Gatos cadastrados. Na Etapa 2 o firmware guarda e devolve, mas ainda nao

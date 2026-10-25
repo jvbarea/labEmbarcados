@@ -120,15 +120,35 @@ Wi-Fi e HTTP ficaram **de fora**, seguindo a fase 1 do
 `WifiManager.*` e `HttpApi.*` não foram portados. Com isso, os itens 5, 7, 9 e
 15 saem do caminho por ora e voltam à mesa quando o Wi-Fi entrar.
 
-A balança virou `MockWeightSource` por trás da interface `IWeightSource`, já que
-não temos células de carga. Quando o HX711 chegar, basta escrever
-`Hx711WeightSource : public IWeightSource` — a FSM não muda uma linha.
+A balança começou como `MockWeightSource` por trás da interface `IWeightSource`,
+quando ainda não havia células de carga. O `Hx711WeightSource` entrou depois sem
+mudar uma linha da FSM, e o mock continua disponível no ambiente `mock`.
+
+## Depois da revisão: o que foi construído
+
+| Etapa | O que entrou |
+|---|---|
+| Servo posicional | calibração do 0° e do 90° físicos em NVS, PWM direto (passa dos 2500 µs da ESP32Servo), partida suave contra o atrito estático, porta segura aberta (`DOOR_HOLD_OPEN`) |
+| Balança real | `Hx711WeightSource` com filtro, estabilidade, tara e calibração em NVS |
+| Protocolo v2 completo | liberações (`grant`/`revoke`), modo adaptação, reabastecer com prazo, rearme pelo `close`, `cfgDump` com o perfil, `sync` de todos os pendentes sem travar o loop |
+| Regras iguais às do app | `AccessStateMachine` reescrita espelhando `MockLink.updateVisit`: a visita só conta depois da decisão, a duração não inclui a espera de saída, as visitas continuam durante o reabastecer e a falha da porta |
+| RNF04 | todo pedido de fechar com peso na plataforma fica pendente até ela esvaziar |
+| BLE | mensagens em pedaços `#i/n:` nos dois sentidos, fila de envio espaçada, MTU negociado |
+| Histórico | anel de 256 eventos no LittleFS, `ts` corrigido no `hello`, `seq` que nunca repete |
+| Flash | configuração igual à gravada não é regravada (o app reenvia tudo a cada conexão) |
+| Testes | simulador no PC com os mesmos fontes ([`tools/host_sim/`](tools/host_sim/)) e teste de bancada pelo Bluetooth do PC ([`tools/v2_handshake.py`](tools/v2_handshake.py)) |
 
 ## O que ainda falta
 
-- [ ] Calibrar `SERVO_US_DOOR_CLOSED` / `SERVO_US_DOOR_OPEN` com a maquete real
-      (hoje 1100/1900 µs são chutes) usando o comando `l` do teste do servo.
-- [ ] Implementar `Hx711WeightSource` quando as células chegarem.
+- [x] Calibrar o servo com a maquete real (0° e 90° físicos, comandos `set0`/`set90`).
+- [x] Implementar `Hx711WeightSource`.
+- [x] Conectar o app de [`app/`](../../../app/) ao protocolo BLE deste firmware.
+- [ ] Confirmar na maquete os valores marcados como PROVISORIO em `config.h`
+      (`WEIGHT_STABILITY_TOLERANCE_G`, `WEIGHT_SAMPLE_INTERVAL_MS`) com os gatos de
+      verdade: o ruído medido foi ~2 g, mas um gato se mexendo é outra história.
+- [ ] Medir a corrente e a temperatura do servo segurando a porta aberta por
+      `maxOpenS` (até 30 min no reabastecer).
+- [ ] Histograma de pesos do modo adaptação em NVS ([docs/08](../../../docs/08-persistencia-dados.md) §4.3).
+      Hoje as amostras vêm do histórico, que guarda os últimos 256 eventos.
 - [ ] Wi-Fi não bloqueante (item 5) antes da fase 2.
 - [ ] Ligar as chaves de fim de curso e trocar `USE_LIMIT_SWITCHES` para 1.
-- [ ] Conectar o app de [`app/`](../../../app/) ao protocolo BLE deste firmware.

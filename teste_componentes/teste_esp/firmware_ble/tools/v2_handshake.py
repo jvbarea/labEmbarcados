@@ -1,177 +1,329 @@
 """
-Imita o que o app Feed Cat faz ao conectar, para validar o firmware sem
-precisar do celular nem do development build.
+Teste de bancada do firmware pelo Bluetooth do PC: faz o papel do app e confere
+cada resposta. Roda com a placa de verdade, sem celular.
 
-    python tools/v2_handshake.py
+    pip install bleak
+    python tools/v2_handshake.py                       # teste completo
+    python tools/v2_handshake.py --capturar msgs.jsonl # e grava tudo o que chegou
+    python tools/v2_handshake.py --restaurar <retrato.json>
 
-Segue a ordem do protocolo v2 (plano/01-app.md secao 7):
-hello -> cfgGet -> cats -> cfg -> sync, e depois exercita uma visita.
+Com a balanca SIMULADA (pio run -e mock -t upload) o teste injeta peso e passa
+por visitas, liberacoes, modo adaptacao, reabastecer e RNF04. Com a balanca REAL
+esses passos sao pulados (dependem de injetar peso) e o resto continua.
 
-Os passos que conduzem a maquina de estados injetando peso so valem com a
-balanca SIMULADA (USE_HX711 0 em src/config.h). Com a balanca real o firmware
-recusa o comando de injecao, e o teste pula esses passos sozinho - para
-exercita-los de verdade, suba peso na plataforma com as maos.
+ATENCAO: a porta abre e fecha varias vezes. Mantenha as maos longe do mecanismo.
+
+O teste NAO tara nem calibra a balanca. Antes de comecar ele tira um retrato do
+que esta gravado no comedouro (gatos, tempos, modo e perfil) e no fim devolve
+tudo como estava, e apaga do historico so os eventos que ele mesmo criou. O
+retrato fica salvo num arquivo; se o teste for interrompido no meio, o
+--restaurar devolve a configuracao a partir dele.
+
+O app nao pode estar conectado ao mesmo tempo: o comedouro aceita uma conexao.
 """
+import argparse
 import asyncio
 import json
+import os
+import sys
+import tempfile
 import time
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
-DEVICE_NAME = "Alimentador"
-RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
-TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+from feedcat_ble import Feeder, find_device
 
-recebidas = []
+GATOS_TESTE = [
+    {"k": 1, "minG": 2700, "maxG": 3700, "rule": "allow"},
+    {"k": 2, "minG": 6000, "maxG": 7000, "rule": "deny"},
+]
+# Tempos curtos para o teste andar rapido.
+CFG_TESTE = {"confMs": 1000, "leaveMs": 1500, "maxOpenS": 60}
+PERFIL_TESTE = json.dumps(
+    [
+        {"id": 1, "name": "Mimi Teste", "emoji": "\U0001F431", "color": "laranja"},
+        {"id": 2, "name": "Bolota Teste", "emoji": "\U0001F408‍⬛", "color": "azul"},
+    ],
+    ensure_ascii=False,
+    separators=(",", ":"),
+)
+
 falhas = 0
-
-
-def on_notify(_, data: bytearray):
-    txt = data.decode("utf-8", "replace")
-    recebidas.append(txt)
-    # o status de 1 em 1 s so aparece nas primeiras mensagens
-    if '"t":"st"' in txt and len(recebidas) > 3:
-        return
-    print("   <-", txt)
 
 
 def checa(rotulo, cond, detalhe=""):
     global falhas
     if not cond:
         falhas += 1
-    print(f"   [{'OK ' if cond else 'FALHA'}] {rotulo}{(' - ' + detalhe) if detalhe else ''}")
+    marca = "OK   " if cond else "FALHA"
+    print(f"   [{marca}] {rotulo}{(' - ' + str(detalhe)) if detalhe and not cond else ''}")
     return cond
 
 
-def ultimo(tipo):
-    for txt in reversed(recebidas):
-        try:
-            m = json.loads(txt)
-        except Exception:
-            continue
-        if m.get("t") == tipo:
-            return m
-    return None
+def etapa(titulo):
+    print(f"\n=== {titulo}")
 
 
-async def passos_de_peso(send):
-    """Conduz a FSM injetando peso. So roda com a balanca simulada."""
-    print("\n=== 5. gato 1 (3200 g) sobe: deve ABRIR ===")
-    await send({"t": "cmd", "id": 5, "c": "mock", "wG": 3200}, 3.5)
-    st = ultimo("st")
-    checa("cat identificado como 1", st and st.get("cat") == 1, str(st))
-    checa("porta abrindo/aberta", st and st.get("door") in ("opening", "open"), str(st))
+def porta(f):
+    return (f.status() or {}).get("door")
 
-    print("\n=== 6. gato 1 desce: visita fecha com duracao ===")
-    await send({"t": "cmd", "id": 6, "c": "mock", "wG": 0}, 5.0)
-    ev = ultimo("ev")
-    checa("evento de visita gerado", ev and ev.get("kind") == "visit", str(ev))
-    checa("visita com door=opened", ev and ev.get("door") == "opened", str(ev))
-    checa("ts em epoch (hello aplicado)", ev and ev.get("ts", 0) > 1700000000, str(ev))
 
-    print("\n=== 7. gato 2 (6500 g) sobe: regra deny, NAO abre ===")
-    await send({"t": "cmd", "id": 7, "c": "mock", "wG": 6500}, 3.5)
-    st = ultimo("st")
-    checa("cat identificado como 2", st and st.get("cat") == 2, str(st))
-    checa("porta continua fechada", st and st.get("door") == "closed", str(st))
-    await send({"t": "cmd", "id": 8, "c": "mock", "wG": 0}, 5.0)
-    ev = ultimo("ev")
-    checa("visita com door=denied", ev and ev.get("door") == "denied", str(ev))
+async def espera_porta(f, estados, timeout=6.0):
+    return await f.wait_for(lambda: porta(f) in estados, timeout)
 
-    print("\n=== 8. peso desconhecido (1200 g): why=unknown ===")
-    await send({"t": "cmd", "id": 9, "c": "mock", "wG": 1200}, 3.5)
-    await send({"t": "cmd", "id": 10, "c": "mock", "wG": 0}, 5.0)
-    ev = ultimo("ev")
-    checa("why=unknown", ev and ev.get("why") == "unknown", str(ev))
+
+async def peso(f, gramas):
+    return await f.request({"t": "cmd", "c": "mock", "wG": gramas})
+
+
+async def visita(f, gramas, em_cima=3.5):
+    """Gato sobe, fica em_cima segundos e desce. Devolve (status em cima, evento)."""
+    inicio = f.mark()
+    await peso(f, gramas)
+    await asyncio.sleep(em_cima)
+    st = f.status()
+    await peso(f, 0)
+    await f.wait_for(lambda: f.last("ev", inicio, kind="visit") is not None, 6.0)
+    return st, f.last("ev", inicio, kind="visit")
+
+
+# ---------------------------------------------------------------- retrato
+
+async def tira_retrato(f):
+    await f.request({"t": "cfgGet"})
+    dump = f.last("cfgDump")
+    _, _, fim = await f.sync(2**31 - 1)  # nada a mandar: so devolve o ultimo seq
+    retrato = {
+        "quando": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "cfgDump": dump,
+        "lastSeq": (fim or {}).get("last"),
+    }
+    caminho = os.path.join(tempfile.gettempdir(), f"alimentador_retrato_{int(time.time())}.json")
+    with open(caminho, "w", encoding="utf-8") as arq:
+        json.dump(retrato, arq, ensure_ascii=False, indent=2)
+    return retrato, caminho
+
+
+async def restaura(f, retrato):
+    dump = retrato.get("cfgDump") or {}
+    await peso(f, 0)  # so tem efeito na balanca simulada
+    await f.request({"t": "cmd", "op": "close"})
+    for k in (1, 2):
+        await f.request({"t": "revoke", "cat": k})
+    oks = []
+    if "cats" in dump:
+        oks.append((await f.request({"t": "cats", "cats": dump["cats"]})).get("ok"))
+    if all(k in dump for k in ("confMs", "leaveMs", "maxOpenS")):
+        oks.append((await f.request({"t": "cfg", "confMs": dump["confMs"],
+                                     "leaveMs": dump["leaveMs"],
+                                     "maxOpenS": dump["maxOpenS"]})).get("ok"))
+    oks.append((await f.request({"t": "mode", "mode": dump.get("mode", "auto")})).get("ok"))
+    oks.append((await f.request({"t": "profile", "blob": dump.get("profile", "")})).get("ok"))
+    if isinstance(retrato.get("lastSeq"), int):
+        oks.append((await f.request({"t": "cmd", "c": "evtrim",
+                                     "after": retrato["lastSeq"]})).get("ok"))
+    return all(oks)
+
+
+async def confere_restauracao(f, retrato):
+    dump = retrato.get("cfgDump") or {}
+    await f.request({"t": "cfgGet"})
+    agora = f.last("cfgDump") or {}
+    iguais = all(agora.get(k) == dump.get(k)
+                 for k in ("cats", "confMs", "leaveMs", "maxOpenS", "mode"))
+    checa("configuracao igual a de antes do teste", iguais, f"antes={dump} agora={agora}")
+    checa("perfil igual ao de antes", agora.get("profile", "") == dump.get("profile", ""))
+    _, eventos, _ = await f.sync(retrato.get("lastSeq") or 0)
+    checa("nenhum evento do teste ficou no historico", len(eventos) == 0,
+          [e.get("kind") for e in eventos])
+
+
+# ----------------------------------------------------------------- etapas
+
+async def etapas_com_peso(f):
+    etapa("gato 1 (3200 g) sobe: abre; desce: visita opened e porta fecha")
+    st, ev = await visita(f, 3200)
+    checa("gato 1 identificado no status", st and st.get("cat") == 1, st)
+    checa("porta abrindo ou aberta com ele em cima", st and st.get("door") in ("opening", "open"), st)
+    checa("visita cat=1 opened rule", ev and ev.get("cat") == 1 and ev.get("door") == "opened"
+          and ev.get("why") == "rule", ev)
+    checa("visita com hora (ts do hello)", ev and ev.get("ts", 0) > 1_700_000_000, ev)
+    checa("porta fechou depois", await espera_porta(f, ("closed",)), porta(f))
+
+    etapa("gato 2 (6500 g, em dieta): nao abre")
+    st, ev = await visita(f, 6500)
+    checa("porta continuou fechada", st and st.get("door") == "closed", st)
+    checa("visita cat=2 denied", ev and ev.get("cat") == 2 and ev.get("door") == "denied", ev)
+
+    etapa("peso desconhecido (1200 g): why=unknown")
+    _, ev = await visita(f, 1200)
+    checa("visita cat=0 unknown denied", ev and ev.get("cat") == 0 and ev.get("why") == "unknown", ev)
+
+    etapa("liberacao do gato 2 por 1 visita")
+    ack = await f.request({"t": "grant", "cat": 2, "visits": 1})
+    checa("ack do grant", ack.get("ok"), ack)
+    await asyncio.sleep(0.3)
+    checa("st.grant = {cat 2, visits 1}", (f.status() or {}).get("grant") == {"cat": 2, "visits": 1},
+          f.status())
+    st, ev = await visita(f, 6500)
+    checa("abriu para o gato 2", st and st.get("door") in ("opening", "open"), st)
+    checa("visita why=grant opened", ev and ev.get("why") == "grant" and ev.get("door") == "opened", ev)
+    checa("liberacao consumida", (f.status() or {}).get("grant") is None, f.status())
+    await espera_porta(f, ("closed",))
+    st, ev = await visita(f, 6500)
+    checa("na seguinte volta a negar", ev and ev.get("door") == "denied", ev)
+
+    etapa("liberacao por prazo e cancelamento")
+    ack = await f.request({"t": "grant", "cat": 2, "untilS": int(time.time()) + 20})
+    checa("ack do grant por prazo", ack.get("ok"), ack)
+    await asyncio.sleep(0.3)
+    checa("st.grant.untilS", "untilS" in ((f.status() or {}).get("grant") or {}), f.status())
+    await f.request({"t": "revoke", "cat": 2})
+    await asyncio.sleep(0.3)
+    checa("revoke limpa", (f.status() or {}).get("grant") is None, f.status())
+
+    etapa("modo adaptacao: abre para qualquer gato")
+    checa("ack do mode learn", (await f.request({"t": "mode", "mode": "learn"})).get("ok"))
+    st, ev = await visita(f, 6500)
+    checa("abriu para o gato 2 em adaptacao", st and st.get("door") in ("opening", "open"), st)
+    checa("visita why=learn learn=1", ev and ev.get("why") == "learn" and ev.get("learn") == 1, ev)
+    checa("ack do mode auto", (await f.request({"t": "mode", "mode": "auto"})).get("ok"))
+    checa("fechada de volta no automatico", await espera_porta(f, ("closed",)), porta(f))
+
+    etapa("RNF04: 'fechar' com gato em cima espera ele sair")
+    await f.request({"t": "cmd", "op": "refill", "timeoutS": 60})
+    await espera_porta(f, ("open",))
+    await peso(f, 6500)
+    await asyncio.sleep(2.0)
+    ack = await f.request({"t": "cmd", "op": "close"})
+    checa("ack do close na hora", ack.get("ok"), ack)
+    await asyncio.sleep(2.0)
+    checa("porta continua aberta com o gato em cima", porta(f) == "open", porta(f))
+    await peso(f, 0)
+    checa("fechou depois que ele saiu", await espera_porta(f, ("closing", "closed"), 6.0), porta(f))
+    await espera_porta(f, ("closed",))
+
+
+async def teste(f):
+    etapa("hello e status")
+    ack = await f.request({"t": "hello", "v": 2, "now": int(time.time())})
+    checa("ack do hello", ack.get("ok"), ack)
+    await asyncio.sleep(0.6)
+    st = f.status()
+    checa("st com todos os campos do v2",
+          st and all(k in st for k in ("wG", "cat", "door", "fcC", "fcO", "grant", "mode", "cfgV")), st)
+    checa("wG inteiro", st and isinstance(st.get("wG"), int), st)
+
+    etapa("retrato do que esta gravado (sera devolvido no fim)")
+    retrato, caminho = await tira_retrato(f)
+    print(f"   retrato salvo em {caminho}")
+    checa("cfgDump recebido", retrato["cfgDump"] is not None)
+    checa("ultimo seq conhecido", isinstance(retrato["lastSeq"], int), retrato["lastSeq"])
+
+    try:
+        etapa("cadastro, tempos e perfil (o perfil passa de um pacote: vai em pedacos)")
+        checa("ack do cats", (await f.request({"t": "cats", "cats": GATOS_TESTE})).get("ok"))
+        checa("ack do cfg", (await f.request({"t": "cfg", **CFG_TESTE})).get("ok"))
+        checa("ack do profile", (await f.request({"t": "profile", "blob": PERFIL_TESTE})).get("ok"))
+        await asyncio.sleep(0.6)
+        v1 = (f.status() or {}).get("cfgV")
+        await f.request({"t": "cats", "cats": GATOS_TESTE})
+        await f.request({"t": "cfg", **CFG_TESTE})
+        await f.request({"t": "profile", "blob": PERFIL_TESTE})
+        await asyncio.sleep(0.6)
+        checa("reenviar igual nao muda o cfgV (nada gravado na flash)",
+              (f.status() or {}).get("cfgV") == v1, f"{v1} -> {(f.status() or {}).get('cfgV')}")
+        await f.request({"t": "cfgGet"})
+        dump = f.last("cfgDump") or {}
+        checa("cfgDump devolve os gatos", dump.get("cats") == GATOS_TESTE, dump.get("cats"))
+        checa("cfgDump devolve o perfil inteiro, com emoji", dump.get("profile") == PERFIL_TESTE,
+              dump.get("profile"))
+
+        sonda = await peso(f, 0)
+        balanca_real = sonda.get("err") == "real_scale"
+        if balanca_real:
+            print("\n### balanca REAL: os passos que injetam peso foram pulados")
+        else:
+            await etapas_com_peso(f)
+
+        etapa("reabastecer e fechar")
+        ack = await f.request({"t": "cmd", "op": "refill", "timeoutS": 30})
+        checa("ack do refill", ack.get("ok"), ack)
+        checa("porta abriu", await espera_porta(f, ("opening", "open"), 2.0), porta(f))
+        await espera_porta(f, ("open",))
+        checa("ack do close", (await f.request({"t": "cmd", "op": "close"})).get("ok"))
+        checa("porta fechou", await espera_porta(f, ("closed",)), porta(f))
+
+        etapa("sincronizacao do historico")
+        ack, eventos, fim = await f.sync(retrato["lastSeq"] or 0)
+        checa("ack do sync", ack and ack.get("ok"), ack)
+        checa("syncEnd no fim", fim is not None, fim)
+        seqs = [e.get("seq") for e in eventos]
+        checa("eventos em ordem, sem repetir", seqs == sorted(set(seqs)), seqs)
+        if fim:
+            checa("syncEnd.last = ultimo evento", not seqs or fim.get("last") == seqs[-1], (fim, seqs))
+        print(f"   {len(eventos)} evento(s) criados pelo teste")
+
+        etapa("entrada ruim")
+        inicio = f.mark()
+        await f.send_raw("{quebrado")
+        await f.wait_for(lambda: f.last("ack", inicio, id=0) is not None, 2.0)
+        checa("JSON quebrado: ack bad_json", (f.last("ack", inicio, id=0) or {}).get("err") == "bad_json")
+        checa("tipo desconhecido: bad_type",
+              (await f.request({"t": "voar"})).get("err") == "bad_type")
+
+        etapa("tamanho dos pacotes")
+        maior = max((len(p) for p in f.raw), default=0)
+        checa(f"maior notificacao = {maior} bytes, cabe no MTU {f.mtu} (limite {f.mtu - 3})",
+              maior <= f.mtu - 3)
+        checa("nenhum pedaco perdido na remontagem", f.asm.dropped == 0, f.asm.dropped)
+    finally:
+        etapa("devolvendo a configuracao de antes do teste")
+        ok = await restaura(f, retrato)
+        checa("restauracao confirmada pelo comedouro", ok)
+        await confere_restauracao(f, retrato)
+        if ok:
+            print(f"   (o retrato {caminho} pode ser apagado)")
 
 
 async def main():
-    dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=12.0)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--capturar", help="grava cada mensagem recebida (uma por linha)")
+    ap.add_argument("--restaurar", help="so devolve a configuracao de um retrato salvo")
+    args = ap.parse_args()
+
+    dev = await find_device()
     if dev is None:
-        print(f"nao encontrei '{DEVICE_NAME}'")
-        return
+        sys.exit(2)
     print(f"conectando em {dev.address}...")
 
-    async with BleakClient(dev) as c:
-        await c.start_notify(TX, on_notify)
+    async with BleakClient(dev) as client:
+        f = Feeder(client)
+        await f.start()
+        print(f"conectado, MTU {f.mtu}")
+        try:
+            if args.restaurar:
+                with open(args.restaurar, encoding="utf-8") as arq:
+                    retrato = json.load(arq)
+                await f.request({"t": "hello", "v": 2, "now": int(time.time())})
+                ok = await restaura(f, retrato)
+                checa("restauracao confirmada pelo comedouro", ok)
+                await confere_restauracao(f, retrato)
+            else:
+                print("ATENCAO: a porta vai abrir e fechar varias vezes.")
+                await teste(f)
+        finally:
+            if args.capturar:
+                with open(args.capturar, "w", encoding="utf-8") as arq:
+                    for texto, _ in f.msgs:
+                        arq.write(texto + "\n")
+                print(f"\n{len(f.msgs)} mensagens gravadas em {args.capturar}")
+            await f.stop()
 
-        async def send(obj, wait=2.0):
-            js = json.dumps(obj, separators=(",", ":"))
-            print("\n   ->", js)
-            await c.write_gatt_char(RX, js.encode(), response=True)
-            await asyncio.sleep(wait)
-
-        print("\n=== 1. hello (o app manda a hora, a ESP32 nao tem RTC) ===")
-        await send({"t": "hello", "id": 1, "v": 2, "now": int(time.time())})
-        ack = ultimo("ack")
-        checa("ack do hello", ack and ack.get("id") == 1 and ack.get("ok"))
-        st = ultimo("st")
-        checa(
-            "st tem todos os campos do v2",
-            st and all(k in st for k in ("wG", "cat", "door", "fcC", "fcO", "grant", "mode", "cfgV")),
-            str(st),
-        )
-
-        print("\n=== 2. cfgGet -> cfgDump ===")
-        await send({"t": "cfgGet", "id": 2})
-        checa("cfgDump recebido", ultimo("cfgDump") is not None, str(ultimo("cfgDump")))
-
-        print("\n=== 3. cats (dois gatos, um bloqueado) ===")
-        await send({"t": "cats", "id": 3, "cats": [
-            {"k": 1, "minG": 2900, "maxG": 3500, "rule": "allow"},
-            {"k": 2, "minG": 6000, "maxG": 7000, "rule": "deny"},
-        ]})
-        ack = ultimo("ack")
-        checa("ack do cats", ack and ack.get("id") == 3 and ack.get("ok"))
-
-        print("\n=== 4. cfg (tempos) ===")
-        await send({"t": "cfg", "id": 4, "confMs": 1000, "leaveMs": 1500, "maxOpenS": 60})
-        ack = ultimo("ack")
-        checa("ack do cfg", ack and ack.get("id") == 4 and ack.get("ok"))
-
-        # Sonda: a balanca aceita peso injetado?
-        await send({"t": "cmd", "id": 5, "c": "mock", "wG": 3200}, 3.5)
-        ack = ultimo("ack")
-        balanca_real = bool(ack and ack.get("ok") is False and "real" in str(ack.get("err", "")))
-
-        if balanca_real:
-            print("\n### balanca REAL em uso - passos 5 a 8 pulados")
-            print("### (dependem de injetar peso; suba peso na plataforma para testar)")
-            st = ultimo("st")
-            checa("status traz peso real da balanca", st and isinstance(st.get("wG"), int), str(st))
-        else:
-            # o comando ja foi aceito acima; segue o fluxo a partir dele
-            st = ultimo("st")
-            checa("cat identificado como 1", st and st.get("cat") == 1, str(st))
-            checa("porta abrindo/aberta", st and st.get("door") in ("opening", "open"), str(st))
-            await passos_de_peso(send)
-
-        print("\n=== 9. reabastecer e fechar ===")
-        await send({"t": "cmd", "id": 11, "op": "refill", "timeoutS": 300}, 3.0)
-        st = ultimo("st")
-        checa("porta abriu no refill", st and st.get("door") in ("opening", "open"), str(st))
-        await send({"t": "cmd", "id": 12, "op": "close"}, 4.0)
-
-        print("\n=== 10. sync do historico ===")
-        await send({"t": "sync", "id": 13, "since": 0}, 3.0)
-        fim = ultimo("syncEnd")
-        checa("syncEnd recebido", fim and fim.get("id") == 13, str(fim))
-
-        print("\n=== 11. grant ainda nao suportado (Etapa 3) ===")
-        await send({"t": "grant", "id": 14, "cat": 2, "visits": 1}, 2.0)
-        ack = ultimo("ack")
-        checa("ack honesto com not_supported",
-              ack and ack.get("ok") is False and ack.get("err") == "not_supported",
-              str(ack))
-
-        print("\n=== 12. tamanho das mensagens (limite do MTU) ===")
-        maior = max(recebidas, key=len)
-        checa(f"maior notificacao = {len(maior)} bytes", len(maior) <= 180, maior[:80])
-
-        await c.stop_notify(TX)
-
-    print(f"\n{'=' * 50}")
+    print("\n" + "=" * 50)
     print("TUDO PASSOU" if falhas == 0 else f"{falhas} VERIFICACAO(OES) FALHARAM")
+    sys.exit(0 if falhas == 0 else 1)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,13 +1,13 @@
 /*
- * Alimentador de Animais - firmware de teste
- * BLE (protocolo Feed Cat v2) + servo posicional + balanca mockada
+ * Alimentador de Animais - firmware
+ * BLE (protocolo Feed Cat v2) + servo posicional + balanca (HX711 ou simulada)
  *
- * Fase 1 do doc 07 / Etapa 2 do plano: so BLE, sem Wi-Fi e sem HTTP. A balanca
- * e simulada, entao da para exercitar a maquina de estados inteira e ver a
- * porta abrir de verdade, sem celula de carga.
+ * Fase 1 do doc 07: so BLE, sem Wi-Fi e sem HTTP. Com 'pio run -e mock' a
+ * balanca e simulada, para exercitar a maquina de estados inteira e ver a porta
+ * abrir de verdade sem celula de carga.
  *
- * O protocolo vive em AppProtocol.cpp; aqui fica so a fiacao dos modulos e o
- * menu serial de bancada.
+ * O protocolo vive em AppProtocol.cpp e as regras em AccessStateMachine.cpp;
+ * aqui fica so a fiacao dos modulos e o menu serial de bancada.
  */
 #include <Arduino.h>
 
@@ -65,36 +65,52 @@ static void ajuda() {
     Serial.println("  w <gramas>     define o peso na balanca simulada (ex.: w 4200)");
   } else {
     Serial.println("  tara           zera a balanca (plataforma vazia)");
-    Serial.println("  cal <gramas>   calibra com a massa conhecida no centro");
+    Serial.println("  calpeso <gramas>  calibra com a massa conhecida no centro");
   }
   Serial.println("  st             imprime o status agora");
-  Serial.println("  open / close   reabastecer / fechar");
-  Serial.println("  reset          rearma depois de uma falha");
-  Serial.println("  min <g>        limite inferior da janela de bancada");
-  Serial.println("  max <g>        limite superior da janela de bancada");
+  Serial.println("  open           reabastecer (fecha sozinha depois de maxOpenS)");
+  Serial.println("  close          fechar (com a porta em falha, rearma)");
+  Serial.println("  reset          rearma tudo depois de uma falha");
+  Serial.println("  min <g>        limite inferior da janela de bancada (so sem gatos)");
+  Serial.println("  max <g>        limite superior da janela de bancada (so sem gatos)");
   if (mockPtr) Serial.println("  sensor off|on  simula sensor mudo / recuperado");
-  Serial.println("  ev             ultimos eventos");
-  Serial.println("  --- calibracao da porta ---");
+  Serial.println("  ev             ultimos 10 eventos");
+  Serial.println("  evclear        apaga o historico da flash (o seq continua)");
+  Serial.println("  --- calibracao do servo e da porta ---");
   Serial.println("  cal on|off     entra/sai do modo calibracao (a FSM para)");
-  Serial.println("  pos <graus>    move o servo para o angulo (so em cal on)");
-  Serial.println("  setclosed      grava a posicao atual como PORTA FECHADA");
-  Serial.println("  setopen        grava a posicao atual como PORTA ABERTA");
+  Serial.println("  servo          mostra a calibracao do servo (vale fora de cal on)");
+  Serial.println("  Dentro de 'cal on':");
+  Serial.printf("  us <valor>     vai para o pulso em us (%d..%d), em rampa\n", SERVO_US_MIN, SERVO_US_MAX);
+  Serial.println("  + / -          anda 10 us a partir do alvo (ou '+25', '-5')");
+  Serial.println("  set0 / set90   grava o pulso atual como 0 / 90 graus FISICOS");
+  Serial.println("  pos <graus>    vai ao angulo pela calibracao (confira no transferidor)");
+  Serial.println("  setclosed      grava o angulo atual como PORTA FECHADA");
+  Serial.println("  setopen        grava o angulo atual como PORTA ABERTA");
   Serial.printf("  janela de bancada: %.0f a %.0f g | confMs %lu | leaveMs %lu\n",
                 c.benchMinG, c.benchMaxG,
                 (unsigned long)c.confMs, (unsigned long)c.leaveMs);
+  Serial.printf("  servo: 0 graus = %d us, 90 graus = %d us%s\n", door.servoUs0(), door.servoUs90(),
+                (c.servoUs0 == DEFAULT_SERVO_US_AT_0DEG && c.servoUs90 == DEFAULT_SERVO_US_AT_90DEG)
+                    ? "  (PADRAO NOMINAL, ainda nao medido)" : "");
   Serial.printf("  porta: fechada=%d graus (%d us), aberta=%d graus (%d us), GPIO %d\n",
-                c.doorClosedDeg, doorDegToUs(c.doorClosedDeg),
-                c.doorOpenDeg, doorDegToUs(c.doorOpenDeg), PIN_SERVO);
-  Serial.printf("  gatos cadastrados: %u | cfgV %lu | modo %s\n",
+                c.doorClosedDeg, door.degToUs(c.doorClosedDeg),
+                c.doorOpenDeg, door.degToUs(c.doorOpenDeg), PIN_SERVO);
+  Serial.printf("  gatos cadastrados: %u | cfgV %lu | modo %s%s\n",
                 (unsigned)c.catCount, (unsigned long)c.cfgV,
-                c.learnMode ? "learn" : "auto");
+                c.learnMode ? "learn" : "auto",
+                c.learnMode ? (LEARN_DOOR_STAYS_OPEN ? " (porta aberta o modo todo)"
+                                                     : " (porta abre a cada visita)")
+                            : "");
+  Serial.printf("  historico: %u evento(s), ultimo seq %lu, %s\n",
+                (unsigned)eventLog.count(), (unsigned long)eventLog.lastSeq(),
+                eventLog.persistent() ? "gravado no LittleFS" : "SO NA RAM (LittleFS falhou)");
   Serial.println();
 }
 
 static void imprimeEventos() {
-  FeederEvent itens[8];
-  size_t n = eventLog.since(0, itens, 8);
-  if (n == 0) { Serial.println("[ev] nenhum evento ainda"); return; }
+  FeederEvent itens[10];
+  size_t n = eventLog.latest(itens, 10);
+  if (n == 0) { Serial.println("[ev] nenhum evento guardado"); return; }
   for (size_t i = 0; i < n; i++) {
     const FeederEvent &e = itens[i];
     Serial.printf("[ev] seq=%lu ts=%lu %s", (unsigned long)e.seq,
@@ -114,6 +130,48 @@ static void imprimeEventos() {
   }
 }
 
+// Os comandos de pulso so valem dentro de 'cal on': fora dele o servo esta
+// desenergizado e quem manda no eixo e a maquina de estados.
+static bool exigeCalibracao() {
+  if (door.isCalibrating()) return true;
+  Serial.println("[erro] entre em 'cal on' antes");
+  return false;
+}
+
+// Acima da faixa nominal o servo pode chegar ao fim de curso interno e passar a
+// forcar a engrenagem. Nao e proibido (a porta precisa chegar a trava fisica), mas
+// a cada passo o operador e lembrado de parar ao primeiro sinal de esforco.
+static void avisaForaDaFaixaNominal(int us) {
+  if (us <= SERVO_US_NOMINAL_MAX) return;
+  Serial.printf("[aviso] %d us esta acima da faixa nominal (%d). Pare ao primeiro zumbido grave\n"
+                "        ou quando o eixo deixar de andar; depois do contato com a trava, no maximo\n"
+                "        mais 10 a 20 us (o torque cresce com a diferenca entre o pulso e a posicao).\n",
+                us, SERVO_US_NOMINAL_MAX);
+}
+
+// toInt() devolve 0 para texto que nao e numero, e 0 vira "500 us" depois do
+// limite: 'us abc' empurraria o eixo ate o fim do curso. Por isso valida antes.
+static bool ehNumeroInteiro(const String &t) {
+  if (t.length() == 0) return false;
+  for (size_t i = 0; i < t.length(); i++) {
+    if (!isDigit(t.charAt(i))) return false;
+  }
+  return true;
+}
+
+static void imprimeCalibracaoServo() {
+  const int us0 = door.servoUs0();
+  const int us90 = door.servoUs90();
+  const int us180 = us0 + 2 * (us90 - us0);
+  Serial.printf("[dado] servo: 0 graus = %d us | 90 graus = %d us | 180 graus (extrapolado) = %d us\n",
+                us0, us90, us180);
+  if (us180 < SERVO_US_MIN || us180 > SERVO_US_MAX) {
+    Serial.printf("[info] o 180 extrapolado cai fora de %d..%d us e seria cortado nesse limite\n",
+                  SERVO_US_MIN, SERVO_US_MAX);
+  }
+  Serial.println("[info] os batentes reais do servo ficam antes ou depois disso - so o transferidor diz");
+}
+
 static void handleSerial(char *buf) {
   String s(buf);
   s.trim();
@@ -129,18 +187,31 @@ static void handleSerial(char *buf) {
   cmd.toLowerCase();
 
   if (cmd == "?" || cmd == "h") { ajuda(); return; }
-  if (cmd == "st")    { Serial.println("[st] " + proto.statusJson()); return; }
-  if (cmd == "open")  { accessFsm.manualOpen();  Serial.println("[ok] reabastecer"); return; }
-  if (cmd == "close") { accessFsm.manualClose(); Serial.println("[ok] fechar"); return; }
-  if (cmd == "reset") { accessFsm.reset();       Serial.println("[ok] rearmado"); return; }
+  if (cmd == "st") {
+    Serial.println("[st] " + proto.statusJson());
+    Serial.printf("[st] fsm=%s reabastecer=%s fechar_pendente=%s ble=%s mtu=%u\n",
+                  accessStateName(accessFsm.state()),
+                  accessFsm.refillActive() ? "sim" : "nao",
+                  accessFsm.closePending() ? "sim" : "nao",
+                  ble.isConnected() ? "conectado" : "sem cliente", (unsigned)ble.mtu());
+    return;
+  }
+  if (cmd == "open") {
+    if (accessFsm.startRefill(0)) Serial.println("[ok] reabastecer");
+    else Serial.println("[erro] porta em falha ou em calibracao - 'close' rearma");
+    return;
+  }
+  if (cmd == "close") { accessFsm.requestClose(); Serial.println("[ok] fechar"); return; }
+  if (cmd == "reset") { accessFsm.reset();        Serial.println("[ok] rearmado"); return; }
   if (cmd == "ev")    { imprimeEventos(); return; }
+  if (cmd == "evclear") { eventLog.clear(); return; }
 
   if (cmd == "w") {
     if (arg.length() == 0) { Serial.println("[erro] uso: w <gramas>"); return; }
     float g = arg.toFloat();
     if (!mockPtr) {
       Serial.println("[erro] balanca REAL em uso - 'w' so vale no modo simulado");
-      Serial.println("       para zerar use 'tara'; para calibrar, 'cal <gramas>'");
+      Serial.println("       para zerar use 'tara'; para calibrar, 'calpeso <gramas>'");
       return;
     }
     mockPtr->setTargetWeightG(g);
@@ -163,8 +234,10 @@ static void handleSerial(char *buf) {
   if (cmd == "cal") {
     if (arg == "on") {
       door.enterCalibration();
-      Serial.printf("[ok] CALIBRACAO ligada - servo em %d graus. Use 'pos <graus>'.\n",
-                    door.currentDeg());
+      Serial.printf("[ok] CALIBRACAO ligada - eixo em %d us (%d graus pela calibracao em vigor)\n",
+                    door.currentPulseUs(), door.currentDeg());
+      Serial.println("[info] va ao meio com 'us 1500' e ande de 10 em 10 us com '+' e '-'.");
+      Serial.println("[info] PARE ao primeiro sinal de esforco: zumbido grave ou eixo que nao anda mais.");
     } else if (arg == "off") {
       door.exitCalibration();
       Serial.println("[ok] calibracao encerrada - voltando para a posicao de fechada");
@@ -178,8 +251,77 @@ static void handleSerial(char *buf) {
     if (!door.isCalibrating()) { Serial.println("[erro] entre em 'cal on' antes"); return; }
     if (arg.length() == 0)     { Serial.println("[erro] uso: pos <graus 0..180>"); return; }
     int deg = constrain(arg.toInt(), 0, 180);
-    door.jogToDeg(deg);
-    Serial.printf("[ok] indo para %d graus (%d us)\n", deg, doorDegToUs(deg));
+    const bool partida = door.jogToDeg(deg);
+    Serial.printf("[ok] indo para %d graus (%d us)\n", deg, door.degToUs(deg));
+    if (partida) {
+      Serial.printf("[info] partida suave: %d graus devagar, pausa de %d ms, depois o resto\n",
+                    DOOR_KICK_DEG, DOOR_KICK_HOLD_MS);
+    }
+    return;
+  }
+
+  if (cmd == "servo") { imprimeCalibracaoServo(); return; }
+
+  if (cmd == "us") {
+    if (!exigeCalibracao()) return;
+    if (!ehNumeroInteiro(arg)) { Serial.println("[erro] uso: us <microssegundos>  (ex.: us 1500)"); return; }
+    const int pedido = arg.toInt();
+    const int us = constrain(pedido, SERVO_US_MIN, SERVO_US_MAX);
+    door.jogToUs(us);
+    Serial.printf("[ok] indo para %d us%s\n", us,
+                  us != pedido ? "  (limitado a faixa de seguranca)" : "");
+    avisaForaDaFaixaNominal(us);
+    return;
+  }
+
+  // '+' e '-' andam a partir do ALVO. Aceita '+', '+25', '+ 25'.
+  if (cmd.charAt(0) == '+' || cmd.charAt(0) == '-') {
+    if (!exigeCalibracao()) return;
+    const bool desce = (cmd.charAt(0) == '-');
+    const String num = (cmd.length() > 1) ? cmd.substring(1) : arg;
+    int passo = SERVO_NUDGE_US;
+    if (num.length() > 0) {
+      if (!ehNumeroInteiro(num) || num.toInt() <= 0) {
+        Serial.println("[erro] uso: '+' ou '-' (10 us), ou '+25' / '-5'");
+        return;
+      }
+      passo = num.toInt();
+    }
+    door.nudge(desce ? -passo : passo);
+    Serial.printf("[ok] alvo = %d us (%d graus pela calibracao)\n",
+                  door.targetPulseUs(), door.usToDeg(door.targetPulseUs()));
+    avisaForaDaFaixaNominal(door.targetPulseUs());
+    return;
+  }
+
+  // Grava o pulso em que o eixo ESTA, entao so vale com o eixo parado: no meio
+  // da rampa o pulso escrito ainda nao e onde o eixo chegou.
+  if (cmd == "set0" || cmd == "set90") {
+    if (!exigeCalibracao()) return;
+    if (!door.atTarget()) {
+      Serial.println("[erro] o eixo ainda esta andando - espere parar e repita");
+      return;
+    }
+    const bool zero = (cmd == "set0");
+    const int us = door.currentPulseUs();
+
+    AppConfig cfg = accessFsm.config();
+    const int novo0  = zero ? us : cfg.servoUs0;
+    const int novo90 = zero ? cfg.servoUs90 : us;
+
+    if (!door.setServoCalibration(novo0, novo90)) {
+      Serial.printf("[erro] recusado: 0 graus = %d us e 90 graus = %d us ficariam a menos de %d us\n",
+                    novo0, novo90, SERVO_CAL_MIN_SPAN_US);
+      Serial.println("       um do outro. Grave o outro ponto primeiro, ou ande mais antes de gravar.");
+      return;
+    }
+
+    cfg.servoUs0 = novo0;
+    cfg.servoUs90 = novo90;
+    storage.saveAppConfig(cfg);
+    accessFsm.applyConfig(cfg);
+    Serial.printf("[ok] %d graus FISICOS = %d us (gravado na NVS)\n", zero ? 0 : 90, us);
+    imprimeCalibracaoServo();
     return;
   }
 
@@ -210,9 +352,11 @@ static void handleSerial(char *buf) {
     return;
   }
 
-  if (cmd == "cal") {
+  // 'calpeso' e nao 'cal': 'cal on|off' e o modo de calibracao da porta. Com os
+  // dois no mesmo nome, o da porta capturava tudo e este nunca executava.
+  if (cmd == "calpeso") {
     if (!hxPtr) { Serial.println("[erro] so com a balanca real"); return; }
-    if (arg.length() == 0) { Serial.println("[erro] uso: cal <gramas>"); return; }
+    if (arg.length() == 0) { Serial.println("[erro] uso: calpeso <gramas>"); return; }
     if (door.isMoving()) { Serial.println("[erro] espere a porta parar"); return; }
     Serial.println("[info] calibrando (~2 s) - massa conhecida no centro");
     if (!hxPtr->calibrate(arg.toFloat())) {
@@ -267,22 +411,26 @@ void setup() {
   balanca.begin();
 #endif
 
-  door.begin(cfg.doorClosedDeg, cfg.doorOpenDeg);
+  door.begin(cfg.doorClosedDeg, cfg.doorOpenDeg, cfg.servoUs0, cfg.servoUs90);
   accessFsm.begin(scale, &door, &eventLog, cfg);
   ble.begin();
   proto.begin(&ble, scale, mockPtr, hxPtr, &door, &accessFsm, &eventLog, &storage);
 
   eventLog.addBoot();
   ajuda();
+  // A pilha BLE come boa parte da RAM; abaixo de ~30 KB livres o firmware fica
+  // sujeito a falhas de alocacao no meio de uma mensagem grande.
+  Serial.printf("[mem] heap livre depois do boot: %u bytes\n", (unsigned)ESP.getFreeHeap());
 }
 
 void loop() {
+  ble.update();  // primeiro: percebe conexao nova ou queda antes de enfileirar
   scale->update();
   accessFsm.update();
   door.update();
 
-  BleMessage msg;
-  while (ble.popMessage(msg)) proto.handleJson(msg.data);
+  static BleMessage msg;  // ~520 bytes: fora da pilha do loop
+  while (ble.popMessage(msg)) proto.handleMessage(msg.data, msg.len);
 
   while (Serial.available()) {
     int c = Serial.read();

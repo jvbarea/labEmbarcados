@@ -10,6 +10,10 @@ web-build/
 # Zip do codigo herdado: o conteudo ja esta em teste_componentes/teste_esp/files/
 files.zip
 
+# Cache do Python (ferramentas BLE em firmware_ble/tools)
+__pycache__/
+*.pyc
+
 # Sistema
 .DS_Store
 Thumbs.db

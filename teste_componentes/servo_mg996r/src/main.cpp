@@ -26,7 +26,7 @@
 #define MODELO "MG946R"
 static const int MS_POR_60_REF = 180;
 
-static const int PINO_SERVO = 18;  // pinagem sugerida em docs/07-comunicacao-app-esp32.md
+static const int PINO_SERVO = 13;  // D13, lado esquerdo da placa. Era 18 (doc 07); mantido igual ao firmware_ble
 
 // Janela absoluta do hardware. So o teste de limites ('l') chega perto destes valores.
 static const int US_MIN_ABS = 500;

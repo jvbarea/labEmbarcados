@@ -53,10 +53,12 @@ O MG995 é, aliás, o servo que o **projeto anterior já usava** (ver
                                │
    ESP32  GND ─────────────────┘
 
-   ESP32  GPIO 18 ─────────────────────► fio LARANJA/AMARELO do servo (sinal)
+   ESP32  GPIO 13 ─────────────────────► fio LARANJA/AMARELO do servo (sinal)
 ```
 
-- **GPIO 18** para o sinal, conforme a pinagem sugerida no [doc 07](../../docs/07-comunicacao-app-esp32.md) §4.
+- **GPIO 13** (D13, header esquerdo, acima do GND) para o sinal. O
+  [doc 07](../../docs/07-comunicacao-app-esp32.md) §4 sugeria o 18, e o teste foi feito
+  nele primeiro; o 13 não é pino de *strapping* e é o mesmo do firmware do app.
 - **GND comum** entre a fonte e a ESP32 não é opcional: sem ele o servo não enxerga o pulso.
 - Capacitor de 1000 µF (470 µF serve) junto ao servo, para absorver o pico de arranque.
 - **Nível lógico:** o servo costuma reconhecer os 3,3 V da ESP32. Se o movimento for errático ou
@@ -105,7 +107,7 @@ Vale saber que existem, para não estranhar o comportamento:
 |---|---|
 | Começa `detach` | nenhum pulso sai antes do `on` |
 | Janela padrão 1000–2000 µs | os extremos de fábrica (500/2500 µs) só são alcançados pela rotina `l` |
-| Rampa de 5 µs a cada 15 ms | evita o pico de corrente do salto e o reset por brownout |
+| Rampa de 5 µs a cada 15 ms | evita o pico de corrente do salto e o reset por brownout (o firmware do app usa passos maiores para abrir e fechar a porta, ver `config.h`) |
 | `x` a qualquer momento | parada de emergência |
 | Auto-desliga em 30 s parado | o servo não fica zumbindo contra um batente enquanto ninguém olha |
 

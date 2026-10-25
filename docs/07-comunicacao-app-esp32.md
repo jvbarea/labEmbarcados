@@ -85,7 +85,7 @@ flowchart LR
 |---|---|---|
 | HX711 DT | 26 | não é pino de *strapping* (o projeto antigo usava o 12, que atrapalha o boot) |
 | HX711 SCK | 25 | idem |
-| Servo PWM | 18 | saída comum, LEDC |
+| Servo PWM | 13 | saída comum, LEDC, não é pino de *strapping* (a primeira sugestão era o 18) |
 | Fim de curso FECHADO | 32 | tem pull-up interno |
 | Fim de curso ABERTO | 33 | tem pull-up interno |
 | LED de estado | 2 | LED da própria placa |

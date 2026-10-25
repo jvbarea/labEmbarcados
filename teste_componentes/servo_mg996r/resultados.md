@@ -24,6 +24,36 @@ serial podem ser coladas direto nas tabelas.
 
 **Janela gravada com `w`:** ________ a ________ µs → excursão total de ________ graus
 
+## 1b. Calibração física 0° e 90° — firmware do app
+
+Feita no firmware do app
+([`teste_esp/firmware_ble`](../teste_esp/firmware_ble/README.md), seção
+*Calibrar o servo e a porta*), com o eixo livre e um transferidor. É essa que
+faz "0°" e "90°" do firmware coincidirem com os ângulos reais.
+
+**Servo medido:** ______________________  ·  **Horn reencaixado?** ( ) não ( ) sim, ______ dentes
+
+| Ponto | Pulso gravado (µs) | Ângulo no transferidor |
+|---|---|---|
+| 0° (`set0`) | | |
+| 90° (`set90`) | | |
+
+**Conferência sem mexer na calibração** (`pos 0`, `pos 45`, `pos 90`):
+
+| Comando | Esperado | Medido no transferidor | Erro |
+|---|---|---|---|
+| `pos 0` | 0° | | |
+| `pos 45` | 45° | | |
+| `pos 90` | 90° | | |
+
+O 45° deve cair em ±2°. Se não cair, dois pontos não bastam e o servo não é
+linear o suficiente para a porta.
+
+**180° extrapolado** (`servo` imprime): ________ µs
+
+**Sobreviveu ao reinício?** Depois de reiniciar a placa, `servo` mostra os mesmos
+dois pulsos: ( ) sim ( ) não
+
 ## 2. Tempo de excursão — comando `t`
 
 | Repetição | min→max (ms) | max→min (ms) | ms / 60° |

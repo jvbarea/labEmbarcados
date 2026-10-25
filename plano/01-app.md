@@ -208,7 +208,7 @@ Transporte: BLE, características `rx` (app → ESP) e `tx` (ESP → app), ver [
 {"t":"cmd","id":8,"op":"tare"}
 {"t":"cmd","id":9,"op":"calibrate","refG":1000}
 {"t":"cfg","id":10,"confMs":2000,"leaveMs":4000,"maxOpenS":900}
-{"t":"mode","id":11,"mode":"learn"}                      // 'learn' = adaptação (porta aberta, só medindo) | 'auto'
+{"t":"mode","id":11,"mode":"learn"}                      // 'learn' = adaptação (abre para qualquer gato, só medindo) | 'auto'
 {"t":"profile","id":13,"blob":"[{\"id\":1,\"name\":\"Mimi\",\"emoji\":\"🐱\"}]"}  // cópia de segurança dos nomes
 {"t":"cfgGet","id":14}                                   // celular novo pergunta o que o comedouro guarda
 {"t":"sync","id":12,"since":120}                         // pede eventos com seq > 120
@@ -230,9 +230,19 @@ Transporte: BLE, características `rx` (app → ESP) e `tx` (ESP → app), ver [
 - `k`/`cat`: id numérico curto do gato (0 = desconhecido); nome, foto e peso "bonito" ficam **só no app**.
 - `seq` cresce sempre (salvo em flash); o app guarda o último `seq` recebido e pede só os novos.
 - Pesos em **gramas inteiras**, tempos em **segundos/milissegundos inteiros**.
-- Uma "visita" = balança passou do limiar de presença até voltar a zero; é gerada **ao final** da visita.
-- Mensagens precisam de MTU negociado (≈185 bytes); a lista `cats` com muitos gatos pode ser enviada em partes
-  (`cat` individual) se passar do limite.
+- Uma "visita" = balança passou do limiar de presença até voltar a zero; é gerada **ao final** da visita, e só
+  conta se chegou a haver decisão (peso estável por `confMs`).
+- **Mensagens maiores que um pacote BLE** (MTU − 3 bytes; o firmware pede MTU 185) vão em pedaços, nos dois
+  sentidos: cada pacote é ou a mensagem inteira (o JSON, que começa com `{`) ou um pedaço com o cabeçalho ASCII
+  `#i/n:` (i = 1..n, n ≤ 99) seguido de um trecho dos **bytes** UTF-8 da mensagem. Quem recebe junta os bytes e só
+  então decodifica; pedaço fora de ordem descarta a montagem. O app escreve em pacotes de até 180 bytes; o
+  firmware corta pelo MTU negociado. Implementado em `app/src/device/framing.ts` e
+  `teste_componentes/teste_esp/firmware_ble/src/BleControl.cpp`.
+- `cats`, `cfg`, `profile` e `mode` iguais ao que o comedouro já guarda são confirmados sem gravar na flash e sem
+  mudar o `cfgV`: o app reenvia tudo a cada conexão.
+- `sync`: o `ack` vem primeiro, depois todos os eventos com `seq > since`, depois o `syncEnd`.
+- Modo `learn` no comedouro real: como o servo precisa segurar a tampa aberta, a porta abre **a cada visita** (para
+  qualquer gato) em vez de ficar aberta por dias. O simulador deixa aberta; os textos do app servem para os dois.
 
 ## 8. Etapas
 
@@ -253,15 +263,20 @@ Transporte: BLE, características `rx` (app → ESP) e `tx` (ESP → app), ver [
 
 ### Etapa 2 — Bluetooth real
 - [ ] Adicionar `react-native-ble-plx`, permissões e plugin; gerar *development build* Android.
-- [ ] `BleLink`: scan por UUID, conexão, MTU, notify, envio com ack e timeout, reconexão automática.
-- [ ] Firmware mínimo de teste na ESP32 (responde `hello`/`ack`, manda `st` com peso do HX711).
-- [ ] Testar antes com **nRF Connect** (sem app) para validar o firmware.
+- [x] `WebBleLink` (Web Bluetooth, no Chrome/Edge com `?ble=1`): scan por UUID, conexão, notify, envio com ack e
+      timeout, fila de escrita, mensagens em pedaços, reconexão automática. O `BleLink` nativo do APK fica para
+      quando houver o *development build*.
+- [x] Firmware na ESP32: `teste_componentes/teste_esp/firmware_ble`, com o peso do HX711 ao vivo.
+- [x] Testado sem o app, pelo PC (`tools/v2_handshake.py`, `tools/ble_console.py`).
 - **Pronto quando:** o peso da balança real aparece ao vivo no app e o `ack` volta para cada comando.
 
 ### Etapa 3 — Integração com o firmware completo
-- [ ] Gatos, regras, liberações e reabastecer funcionando com a porta real (servo 360° + fim de curso).
-- [ ] Sincronização de histórico após ficar desconectado.
-- [ ] Tratamento de falhas (porta travada, desconexão no meio de um comando).
+- [x] Gatos, regras, liberações, modo adaptação e reabastecer no firmware (servo **posicional** 180°, sem fim de
+      curso por ora), com as mesmas regras do `MockLink`.
+- [x] Histórico na flash da ESP (256 eventos) e sincronização completa depois de ficar desconectado.
+- [x] Falhas: porta travada (evento + rearme pelo `close`), sensor mudo, desconexão no meio de um comando.
+- [x] Simulador do firmware no PC com os mesmos fontes (`firmware_ble/tools/host_sim`).
+- [ ] Roteiro de teste da §11 na maquete.
 - **Pronto quando:** roteiro de teste da §11 passa na maquete.
 
 ### Etapa 4 — Acabamento
@@ -304,11 +319,17 @@ navegador. O guia está em [`../app/README.md`](../app/README.md).
 
 ## 11. Roteiro de teste de aceitação (maquete)
 
-1. Primeiro uso: permissões → encontra "Feed Cat" → conecta.
+1. Primeiro uso: Conectar → o seletor mostra "Alimentador" → conecta.
 2. Cadastrar Mimi (3,2 kg, liberada) e Bolota (6,5 kg, dieta).
 3. Peso de 3,2 kg na balança → app mostra "Mimi", porta abre; retirar → porta fecha; histórico registra "aberta".
 4. Peso de 6,5 kg → porta não abre; histórico registra "negado".
-5. "Liberar Bolota por 2 min" → 6,5 kg abre; após 2 min, novo teste nega.
+5. "Liberar Bolota" (15 min ou 1 visita) → 6,5 kg abre; depois do prazo (ou da visita), novo teste nega.
 6. "Reabastecer" → porta abre e fecha sozinha no tempo definido.
-7. Desligar o Bluetooth do celular, fazer 3 visitas, religar → as 3 aparecem no histórico com o horário certo.
+7. Desconectar o app, fazer 3 visitas, reconectar → as 3 aparecem no histórico com o horário certo.
 8. Desligar e religar a ESP → gatos e regras continuam valendo.
+
+Na bancada, sem gatos de verdade: cadastre com o peso de objetos conhecidos. A faixa de cada gato é o peso
+± 500 g, então os dois precisam de **mais de 1 kg de diferença** (ex.: uma garrafa de 0,7 kg como um gato e
+2 kg de garrafas como o outro). Antes, confira a calibração da balança com uma massa conhecida (aba Comedouro).
+Com o firmware no ambiente `mock`, o mesmo roteiro roda com o app conectado e o peso injetado pelo monitor
+serial (`w 3200`, `w 0`): o serial não disputa a conexão BLE com o app.

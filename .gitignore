@@ -1,0 +1,21 @@
+# Build do PlatformIO (centenas de MB, sempre regeravel com `pio run`)
+.pio/
+
+# Dependencias e build do app Expo
+node_modules/
+.expo/
+dist/
+web-build/
+# APKs gerados por app/scripts/build-apk.ps1 (~100 MB cada; regeraveis)
+app/dist-apk/
+
+# Zip do codigo herdado: o conteudo ja esta em teste_componentes/teste_esp/files/
+files.zip
+
+# Cache do Python (ferramentas BLE em firmware_ble/tools)
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+Thumbs.db

@@ -192,6 +192,13 @@ bool AccessStateMachine::shouldCloseAfterVisit() const {
   return s == DoorState::OPEN || s == DoorState::OPENING;
 }
 
+uint32_t AccessStateMachine::refillLeftS() const {
+  if (!refillActive_) return 0;
+  const unsigned long passou = millis() - refillStartMs_;
+  if (passou >= refillTimeoutMs_) return 0;
+  return (uint32_t)((refillTimeoutMs_ - passou + 999UL) / 1000UL);  // arredonda para cima
+}
+
 void AccessStateMachine::endRefill(bool logEvent) {
   if (!refillActive_) return;
   refillActive_ = false;

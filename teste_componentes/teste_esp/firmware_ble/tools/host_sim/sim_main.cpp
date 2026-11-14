@@ -608,9 +608,14 @@ static void testLearnMode() {
 static void testRefillAndRnf04() {
   titulo("reabastecer: visitas continuam, porta so fecha no prazo e nunca com gato em cima");
   readyDevice();
+  CHECK(lastStatus()["refillS"].isNull(), "sem refillS fora do reabastecer");
   CHECK(ackOk(request(J(R"({"t":"cmd","op":"refill","timeoutS":30})"))), "ack do refill");
   run(3000);
   CHECK(door() == "open", "porta aberta para reabastecer (%s)", door().c_str());
+  {
+    const int falta = lastStatus()["refillS"] | -1;
+    CHECK(falta >= 26 && falta <= 28, "st.refillS conta o tempo que falta (%d)", falta);
+  }
 
   size_t m0 = phone.msgs.size();
   visit(6500);

@@ -73,6 +73,9 @@ String AppProtocol::statusJson() const {
 
   doc["mode"] = modeName(fsm_->config());
   doc["cfgV"] = fsm_->config().cfgV;
+  // So durante o reabastecer: o app conta o tempo a partir daqui (campo opcional,
+  // o app antigo ignora).
+  if (fsm_->refillActive()) doc["refillS"] = fsm_->refillLeftS();
   String out;
   serializeJson(doc, out);
   return out;
@@ -99,6 +102,7 @@ String AppProtocol::statusKey() const {
   }
   k += '|';
   k += fsm_->config().cfgV;
+  k += fsm_->refillActive() ? 'R' : '-';
   return k;
 }
 

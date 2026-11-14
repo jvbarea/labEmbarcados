@@ -53,6 +53,22 @@ AppProtocol proto;
 static char linha[96];
 static size_t linhaLen = 0;
 
+// Comando 'peso': imprime a balanca a cada 0,5 s ate digitar 'peso' de novo.
+static bool mostrandoPeso = false;
+static unsigned long ultimoPesoMs = 0;
+
+static void imprimePeso() {
+  if (hxPtr) {
+    Serial.printf("[peso] %8.0f g | cru %9ld | fator %.3f | tara %ld | %s | %s\n",
+                  scale->weightG(), hxPtr->rawCounts(), hxPtr->calibFactor(),
+                  hxPtr->tareOffset(), scale->isStable() ? "estavel" : "variando",
+                  scale->isHealthy() ? "sensor ok" : "SENSOR MUDO");
+  } else {
+    Serial.printf("[peso] %8.0f g (simulada) | %s\n", scale->weightG(),
+                  scale->isStable() ? "estavel" : "variando");
+  }
+}
+
 // --------------------------------------------------------- comandos Serial
 
 static void ajuda() {
@@ -68,6 +84,7 @@ static void ajuda() {
     Serial.println("  calpeso <gramas>  calibra com a massa conhecida no centro");
   }
   Serial.println("  st             imprime o status agora");
+  Serial.println("  peso           liga/desliga a balanca na tela a cada 0,5 s (g, cru, fator, tara)");
   Serial.println("  open           reabastecer (fecha sozinha depois de maxOpenS)");
   Serial.println("  close          fechar (com a porta em falha, rearma)");
   Serial.println("  reset          rearma tudo depois de uma falha");
@@ -204,6 +221,12 @@ static void handleSerial(char *buf) {
   if (cmd == "close") { accessFsm.requestClose(); Serial.println("[ok] fechar"); return; }
   if (cmd == "reset") { accessFsm.reset();        Serial.println("[ok] rearmado"); return; }
   if (cmd == "ev")    { imprimeEventos(); return; }
+  if (cmd == "peso") {
+    mostrandoPeso = !mostrandoPeso;
+    Serial.println(mostrandoPeso ? "[ok] peso a cada 0,5 s - digite 'peso' de novo para parar"
+                                 : "[ok] parou");
+    return;
+  }
   if (cmd == "evclear") { eventLog.clear(); return; }
 
   if (cmd == "w") {
@@ -446,4 +469,9 @@ void loop() {
   }
 
   proto.tick();
+
+  if (mostrandoPeso && millis() - ultimoPesoMs >= 500) {
+    ultimoPesoMs = millis();
+    imprimePeso();
+  }
 }

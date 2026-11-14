@@ -98,6 +98,9 @@ class AccessStateMachine {
 
   AccessState state() const { return state_; }
   bool refillActive() const { return refillActive_; }
+  // Segundos que faltam para o reabastecer fechar sozinho (0 fora dele). Vai no
+  // "st" como refillS, para o app mostrar a contagem mesmo depois de reabrir.
+  uint32_t refillLeftS() const;
   bool closePending() const { return closePending_; }
 
  private:

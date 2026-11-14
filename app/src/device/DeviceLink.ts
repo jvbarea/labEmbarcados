@@ -2,8 +2,8 @@
  * Transporte entre o app e o comedouro.
  *
  * As telas nunca falam com o transporte direto: elas usam os stores, que usam
- * esta interface. Hoje existe o MockLink (simulador); na Etapa 2 entra o
- * BleLink, sem mexer em tela nenhuma.
+ * esta interface. Implementacoes: MockLink (simulador), WebBleLink (Bluetooth
+ * pelo navegador) e NativeBleLink (Bluetooth do APK).
  */
 
 import { AppMessage, DeviceMessage } from './protocol';
@@ -23,6 +23,11 @@ export interface DeviceLink {
   send(msg: AppMessage): Promise<void>;
   onMessage(handler: DeviceMessageHandler): Unsubscribe;
   onConnectionChange(handler: ConnectionHandler): Unsubscribe;
+  /**
+   * Esquece o comedouro guardado: a proxima conexao procura de novo. So existe
+   * no Bluetooth nativo, que lembra o aparelho entre uma abertura e outra.
+   */
+  forget?(): Promise<void>;
 }
 
 /** Erro de transporte (sem conexao, escrita falhou). */

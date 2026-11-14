@@ -1,10 +1,10 @@
 import { Redirect, useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { BigButton, Card, CatAvatar, KeyValue, Row, SectionTitle, StatusPill, WeightDisplay } from '../../src/ui/components';
 import { ConnectionPill, FeedbackBanner, OfflineBanner } from '../../src/ui/deviceViews';
 import { useAction, useNow } from '../../src/ui/hooks';
-import { doorLook, screen } from '../../src/ui/tokens';
+import { doorLook, doorLookOffline, screen } from '../../src/ui/tokens';
 import { useDeviceStore } from '../../src/store/deviceStore';
 import { catLabel, useCatsStore } from '../../src/store/catsStore';
 import { summarizeDay, useEventsStore } from '../../src/store/eventsStore';
@@ -21,7 +21,6 @@ export default function InicioScreen() {
   const { run, feedback, isPending } = useAction();
   const now = useNow();
   const router = useRouter();
-  const [refillStartedAt, setRefillStartedAt] = useState<number | null>(null);
 
   const hoje = startOfDay(now);
   const resumo = useMemo(() => summarizeDay(events, hoje), [events, hoje]);
@@ -31,12 +30,15 @@ export default function InicioScreen() {
   const peso = status?.wG ?? 0;
   const naBalanca = peso >= PRESENCE_THRESHOLD_G;
   const gatoAtual = cats.find((c) => c.id === status?.cat);
-  const porta = doorLook[status?.door ?? 'closed'];
+  const conectado = connection === 'connected';
+  const porta = conectado && status ? doorLook[status.door] : doorLookOffline;
   const grant = status?.grant ?? null;
   const gatoLiberado = cats.find((c) => c.id === grant?.cat);
-  const bloqueado = cats.find((c) => c.rule === 'deny');
-  const reabastecendo = refillStartedAt !== null && status?.door !== 'closed';
-  const restanteReabastecer = refillStartedAt ? settings.maxOpenS - (now - refillStartedAt) : 0;
+  const bloqueados = cats.filter((c) => c.rule === 'deny');
+  // A contagem vem do proprio comedouro (st.refillS): sobrevive a recarregar o
+  // app e some sozinha quando a porta fecha no fim do prazo.
+  const restanteReabastecer = conectado ? status?.refillS : undefined;
+  const reabastecendo = restanteReabastecer !== undefined;
 
   const cartaoAoVivo = (
     <Card className="gap-3">
@@ -56,7 +58,13 @@ export default function InicioScreen() {
         <View className="flex-1">
           <WeightDisplay text={formatKg(peso)} muted={!naBalanca} />
           <Text className={screen.subtitle}>
-            {!naBalanca ? 'Balança vazia' : gatoAtual ? catLabel(gatoAtual) : 'Visitante desconhecido'}
+            {!conectado
+              ? 'Sem conexão com o comedouro'
+              : !naBalanca
+                ? 'Balança vazia'
+                : gatoAtual
+                  ? catLabel(gatoAtual)
+                  : 'Visitante desconhecido'}
           </Text>
         </View>
       </Row>
@@ -74,7 +82,7 @@ export default function InicioScreen() {
       {reabastecendo ? (
         <View className="rounded-xl bg-sky-100 px-3 py-2 dark:bg-sky-900">
           <Text className="text-sm font-medium text-sky-900 dark:text-sky-100">
-            Reabastecendo — fecha sozinha em {formatCountdown(Math.max(0, restanteReabastecer))}
+            Reabastecendo — fecha sozinha em {formatCountdown(Math.max(0, restanteReabastecer ?? 0))}
           </Text>
         </View>
       ) : null}
@@ -99,7 +107,7 @@ export default function InicioScreen() {
   return (
     <ScrollView className={screen.page} contentContainerClassName={screen.content}>
       <Row className="justify-between">
-        <Text className={screen.title}>Feed Cat</Text>
+        <Text className={screen.title}>FELIS</Text>
         <ConnectionPill />
       </Row>
 
@@ -154,8 +162,8 @@ export default function InicioScreen() {
       <Card className="gap-3">
         <SectionTitle hint="O comedouro executa e avisa o app">Ações</SectionTitle>
 
-        {bloqueado ? (
-          <View className="gap-2">
+        {bloqueados.map((bloqueado) => (
+          <View key={bloqueado.id} className="gap-2">
             <Text className={screen.label}>Liberar {catLabel(bloqueado)} (em dieta)</Text>
             <Row>
               <BigButton
@@ -163,11 +171,11 @@ export default function InicioScreen() {
                 title="Por 15 min"
                 icon="time"
                 variant="secondary"
-                loading={isPending('grant-min')}
-                disabled={connection !== 'connected'}
+                loading={isPending(`grant-min-${bloqueado.id}`)}
+                disabled={!conectado}
                 onPress={() =>
                   run(
-                    'grant-min',
+                    `grant-min-${bloqueado.id}`,
                     () => useDeviceStore.getState().grant(bloqueado.id, { minutes: 15 }),
                     `${catLabel(bloqueado)} liberado por 15 minutos.`,
                   )
@@ -178,30 +186,30 @@ export default function InicioScreen() {
                 title="1 visita"
                 icon="repeat"
                 variant="secondary"
-                loading={isPending('grant-visit')}
-                disabled={connection !== 'connected'}
+                loading={isPending(`grant-visit-${bloqueado.id}`)}
+                disabled={!conectado}
                 onPress={() =>
                   run(
-                    'grant-visit',
+                    `grant-visit-${bloqueado.id}`,
                     () => useDeviceStore.getState().grant(bloqueado.id, { visits: 1 }),
                     `${catLabel(bloqueado)} liberado na próxima visita.`,
                   )
                 }
               />
             </Row>
-            {grant ? (
+            {grant?.cat === bloqueado.id ? (
               <BigButton
                 title="Cancelar liberação"
                 variant="ghost"
                 loading={isPending('revoke')}
-                disabled={connection !== 'connected'}
+                disabled={!conectado}
                 onPress={() =>
                   run('revoke', () => useDeviceStore.getState().revoke(grant.cat), 'Liberação cancelada.')
                 }
               />
             ) : null}
           </View>
-        ) : null}
+        ))}
 
         <View className="h-px bg-slate-200 dark:bg-slate-800" />
 
@@ -211,14 +219,11 @@ export default function InicioScreen() {
             icon="lock-closed"
             variant="danger"
             loading={isPending('fechar')}
-            disabled={connection !== 'connected'}
+            disabled={!conectado}
             onPress={() =>
               run(
                 'fechar',
-                async () => {
-                  await useDeviceStore.getState().closeDoor();
-                  setRefillStartedAt(null);
-                },
+                () => useDeviceStore.getState().closeDoor(),
                 'Fechando a porta.',
               )
             }
@@ -228,14 +233,11 @@ export default function InicioScreen() {
             title="Abrir para reabastecer"
             icon="restaurant"
             loading={isPending('reabastecer')}
-            disabled={connection !== 'connected'}
+            disabled={!conectado}
             onPress={() =>
               run(
                 'reabastecer',
-                async () => {
-                  await useDeviceStore.getState().refill(settings.maxOpenS);
-                  setRefillStartedAt(Math.floor(Date.now() / 1000));
-                },
+                () => useDeviceStore.getState().refill(settings.maxOpenS),
                 'Porta aberta para reabastecer.',
               )
             }

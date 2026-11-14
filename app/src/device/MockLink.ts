@@ -55,7 +55,7 @@ function asDomainCats(cats: DeviceCat[]): Cat[] {
 
 export class MockLink implements DeviceLink {
   readonly kind = 'mock' as const;
-  readonly label = 'Feed Cat (simulador)';
+  readonly label = 'FELIS (simulador)';
 
   private connected = false;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -537,6 +537,9 @@ export class MockLink implements DeviceLink {
       mode: this.mode,
       cfgV: this.cfgV,
     };
+    if (this.refillUntilMs > 0) {
+      st.refillS = Math.max(0, Math.ceil((this.refillUntilMs - Date.now()) / 1000));
+    }
     this.emit(st);
   }
 

@@ -3,11 +3,16 @@
  *
  * O comedouro guarda os eventos num buffer e o app sincroniza por numero de
  * sequencia (seq), entao nada se perde enquanto o Bluetooth fica desconectado.
+ *
+ * Ha um historico para o comedouro real e outro para o simulador: trocar de
+ * modo na aba Comedouro troca qual deles aparece, e os dados de exemplo do
+ * simulador nunca se misturam com as visitas de verdade.
  */
 
 import { create } from 'zustand';
 import { EventMsg } from '../device/protocol';
 import { STORAGE_KEYS, loadJson, saveJson } from '../data/storage';
+import type { LinkKind } from '../device/createLink';
 import { hourOf, startOfDay } from '../domain/format';
 
 /** Quantos dias de historico ficam no celular. */
@@ -24,7 +29,10 @@ interface EventsStore {
   lastSeq: number;
   loaded: boolean;
 
-  load: () => Promise<void>;
+  /** De qual modo e o historico carregado agora. */
+  kind: LinkKind;
+  /** Carrega o historico de um modo (o do simulador ou o do comedouro real). */
+  load: (kind?: LinkKind) => Promise<void>;
   ingest: (event: EventMsg) => void;
   /**
    * O comedouro recomecou a numeracao (ESP regravada, ou troca do simulador
@@ -40,14 +48,22 @@ function prune(events: EventMsg[]): EventMsg[] {
   return events.filter((e) => e.ts >= limite).slice(-MAX_EVENTS);
 }
 
+export function eventsKey(kind: LinkKind): string {
+  return kind === 'mock' ? STORAGE_KEYS.eventsSim : STORAGE_KEYS.events;
+}
+
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function persistNow(state: EventsStore): Promise<void> {
+  return saveJson(eventsKey(state.kind), { events: state.events, lastSeq: state.lastSeq });
+}
 
 /** Grava em lote: chegam dezenas de eventos seguidos numa sincronizacao. */
 function schedulePersist(get: () => EventsStore) {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
-    const state = get();
-    void saveJson(STORAGE_KEYS.events, { events: state.events, lastSeq: state.lastSeq });
+    persistTimer = null;
+    void persistNow(get());
   }, 400);
 }
 
@@ -55,13 +71,21 @@ export const useEventsStore = create<EventsStore>((set, get) => ({
   events: [],
   lastSeq: 0,
   loaded: false,
+  kind: 'ble',
 
-  load: async () => {
-    const saved = await loadJson<{ events: EventMsg[]; lastSeq: number }>(STORAGE_KEYS.events, {
+  load: async (kind) => {
+    const alvo = kind ?? get().kind;
+    // Gravacao pendente do modo que esta saindo vai para a chave dele, antes da troca.
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+      await persistNow(get());
+    }
+    const saved = await loadJson<{ events: EventMsg[]; lastSeq: number }>(eventsKey(alvo), {
       events: [],
       lastSeq: 0,
     });
-    set({ events: prune(saved.events), lastSeq: saved.lastSeq, loaded: true });
+    set({ kind: alvo, events: prune(saved.events ?? []), lastSeq: saved.lastSeq ?? 0, loaded: true });
   },
 
   ingest: (event) => {
@@ -80,8 +104,12 @@ export const useEventsStore = create<EventsStore>((set, get) => ({
   },
 
   clear: async () => {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
     set({ events: [], lastSeq: 0 });
-    await saveJson(STORAGE_KEYS.events, { events: [], lastSeq: 0 });
+    await saveJson(eventsKey(get().kind), { events: [], lastSeq: 0 });
   },
 }));
 

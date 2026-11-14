@@ -1,51 +1,68 @@
 /**
- * Escolhe o transporte na hora que o app carrega.
+ * Qual transporte usar: o simulador ou o comedouro real.
  *
- * O padrao continua sendo o SIMULADOR: e dele que dependem a demonstracao e os
- * testes, e o navegador tem Web Bluetooth mesmo quando nao ha comedouro por
- * perto. O BLE e opt-in explicito:
+ * O usuario escolhe na aba Comedouro ("Comedouro real" / "Simulador") e a
+ * escolha fica salva. Por plataforma:
  *
- *   http://localhost:8081/?ble=1     liga o Bluetooth (e lembra da escolha)
- *   http://localhost:8081/?ble=0     volta para o simulador
+ *   Android/iOS (APK)  real = NativeBleLink (react-native-ble-plx)
+ *   navegador          real = WebBleLink (Web Bluetooth, Chrome/Edge)
+ *   qualquer um        simulador = MockLink
  *
- * A escolha fica no localStorage, entao vale para as recargas seguintes sem
- * precisar do parametro na URL.
+ * Sem escolha salva, o celular comeca no comedouro real e o navegador no
+ * simulador. Na web a URL ainda vale e tem prioridade:
+ *
+ *   http://localhost:8081/?ble=1     comedouro real
+ *   http://localhost:8081/?ble=0     simulador
  */
 
 import { Platform } from 'react-native';
 
 import { DeviceLink } from './DeviceLink';
 import { MockLink } from './MockLink';
+import { NativeBleLink } from './NativeBleLink';
 import { WebBleLink, webBleAvailable } from './WebBleLink';
 
-const STORAGE_KEY = 'feedcat.link';
+export type LinkKind = DeviceLink['kind'];
 
-/** Le a preferencia da URL (que tem prioridade) e depois do localStorage. */
-export function bleRequested(): boolean {
-  if (Platform.OS !== 'web') return false;
-  if (typeof window === 'undefined') return false;
+/** Chave antiga (so web), de antes da escolha existir no app. */
+const LEGACY_WEB_KEY = 'feedcat.link';
 
+/** Na web, `?ble=1` / `?ble=0` na URL. null quando nao veio nada. */
+export function urlLinkOverride(): LinkKind | null {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return null;
   try {
     const busca = window.location?.search ?? '';
-    if (busca.includes('ble=1')) {
-      window.localStorage?.setItem(STORAGE_KEY, 'ble');
-      return true;
-    }
-    if (busca.includes('ble=0')) {
-      window.localStorage?.removeItem(STORAGE_KEY);
-      return false;
-    }
-    return window.localStorage?.getItem(STORAGE_KEY) === 'ble';
+    if (busca.includes('ble=1')) return 'ble';
+    if (busca.includes('ble=0')) return 'mock';
   } catch {
-    // Modo anonimo ou storage bloqueado: cai no simulador, que sempre funciona.
-    return false;
+    // sem window.location (testes): segue o padrao
   }
+  return null;
 }
 
-export function createLink(): DeviceLink {
-  if (bleRequested()) {
+/** Escolha de quem ainda nao escolheu nada no app. */
+export function defaultLinkKind(): LinkKind {
+  if (Platform.OS !== 'web') return 'ble';
+  try {
+    if (typeof window !== 'undefined' && window.localStorage?.getItem(LEGACY_WEB_KEY) === 'ble') {
+      return 'ble';
+    }
+  } catch {
+    // modo anonimo ou storage bloqueado
+  }
+  return 'mock';
+}
+
+/** O comedouro real existe nesta plataforma? (Firefox e Safari nao tem Web Bluetooth.) */
+export function realLinkAvailable(): boolean {
+  return Platform.OS !== 'web' || webBleAvailable();
+}
+
+export function createLink(kind: LinkKind): DeviceLink {
+  if (kind === 'ble') {
+    if (Platform.OS !== 'web') return new NativeBleLink();
     if (webBleAvailable()) return new WebBleLink();
-    console.warn('[link] ?ble=1 pedido, mas este navegador nao tem Web Bluetooth; usando o simulador');
+    console.warn('[link] este navegador nao tem Web Bluetooth; usando o simulador');
   }
   return new MockLink();
 }

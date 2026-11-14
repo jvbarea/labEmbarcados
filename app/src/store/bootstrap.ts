@@ -19,6 +19,12 @@ async function aposConectar() {
     await useCatsStore.getState().recoverFromDevice();
   }
   await useCatsStore.getState().syncToDevice();
+
+  // No simulador, se o historico dele esta vazio, semeia alguns dias de visitas
+  // (incluindo hoje) para as telas nao nascerem vazias. Uma vez so: depois o
+  // historico do simulador ja esta salvo. O do comedouro real nunca e semeado.
+  const temVisitas = useEventsStore.getState().events.some((e) => e.kind === 'visit');
+  if (!temVisitas) simulator()?.seedHistory(2);
 }
 
 export function useBootstrap(): boolean {
@@ -35,24 +41,18 @@ export function useBootstrap(): boolean {
       }
       await Promise.all([
         useCatsStore.getState().load(),
-        useEventsStore.getState().load(),
         useDeviceStore.getState().loadSettings(),
+        // simulador ou comedouro real, e o historico daquele modo
+        useDeviceStore.getState().restoreLink(),
       ]);
       if (cancelado) return;
       setReady(true);
 
       try {
-        // No Bluetooth pelo navegador isto falha de proposito (o seletor exige
-        // um toque); a conexao vem do botao Conectar.
+        // No celular conecta sozinho (pede a permissao de Bluetooth na primeira
+        // vez). No navegador falha de proposito: o seletor exige um toque, e a
+        // conexao vem do botao Conectar.
         await useDeviceStore.getState().connect();
-
-        // No simulador, se nao ha nada guardado ainda, semeia alguns dias de
-        // visitas (incluindo hoje) para as telas nao nascerem vazias.
-        // Roda uma vez so: na recarga seguinte o historico ja esta salvo.
-        const temVisitas = useEventsStore
-          .getState()
-          .events.some((e) => e.kind === 'visit');
-        if (!temVisitas) simulator()?.seedHistory(2);
       } catch {
         // sem conexao: o app funciona mostrando o ultimo estado conhecido
       }

@@ -3,6 +3,7 @@ import { Pressable, ScrollView, Text, View } from 'react-native';
 import { Card, EmptyState, SectionTitle, StatusPill } from '../../src/ui/components';
 import { screen } from '../../src/ui/tokens';
 import { catLabel, useCatsStore } from '../../src/store/catsStore';
+import { useDeviceStore } from '../../src/store/deviceStore';
 import { groupByDay, useEventsStore, visitsByHour } from '../../src/store/eventsStore';
 import { formatDayLabel, formatDuration, formatKg, formatTime, nowS, startOfDay } from '../../src/domain/format';
 import { EventMsg } from '../../src/device/protocol';
@@ -13,13 +14,19 @@ export default function HistoricoScreen() {
   const events = useEventsStore((s) => s.events);
   const cats = useCatsStore((s) => s.cats);
   const [filtro, setFiltro] = useState<Filtro>('todos');
+  const noSimulador = useDeviceStore((s) => s.linkKind === 'mock');
 
+  // Filtro por gato vale so para visitas: reabastecer, falha e boot nao sao "de" ninguem.
   const filtrados = useMemo(
-    () => (filtro === 'todos' ? events : events.filter((e) => (e.cat ?? 0) === filtro)),
+    () =>
+      filtro === 'todos'
+        ? events
+        : events.filter((e) => e.kind === 'visit' && (e.cat ?? 0) === filtro),
     [events, filtro],
   );
   const dias = useMemo(() => groupByDay(filtrados), [filtrados]);
-  const horas = useMemo(() => visitsByHour(events, startOfDay(nowS())), [events]);
+  // O grafico acompanha o filtro.
+  const horas = useMemo(() => visitsByHour(filtrados, startOfDay(nowS())), [filtrados]);
   const maxHora = Math.max(1, ...horas);
 
   const opcoes: { key: Filtro; label: string }[] = [
@@ -67,7 +74,11 @@ export default function HistoricoScreen() {
           <EmptyState
             icon="time-outline"
             title="Nenhuma visita registrada"
-            description="Use o painel do simulador na aba Comedouro para gerar visitas."
+            description={
+              noSimulador
+                ? 'Use o painel do simulador na aba Comedouro para gerar visitas.'
+                : 'As visitas aparecem aqui quando um gato sobe na balança do comedouro.'
+            }
           />
         </Card>
       ) : (
@@ -89,6 +100,7 @@ function nomeDoEvento(ev: EventMsg, cats: ReturnType<typeof useCatsStore.getStat
   if (ev.kind === 'fault') return 'Falha na porta';
   if (ev.kind === 'boot') return 'Comedouro ligado';
   const cat = cats.find((c) => c.id === ev.cat);
+  if (ev.learn === 1) return cat ? `${catLabel(cat)} · adaptação` : 'Amostra da adaptação';
   return cat ? catLabel(cat) : 'Visitante desconhecido';
 }
 
@@ -115,10 +127,11 @@ function EventoLinha({ ev, nome }: { ev: EventMsg; nome: string }) {
         </Text>
       </View>
       {ev.kind === 'visit' ? (
-        <StatusPill
-          label={abriu ? 'Comeu' : 'Negado'}
-          tone={abriu ? 'success' : 'warning'}
-        />
+        ev.learn === 1 ? (
+          <StatusPill label="Medido" tone="info" />
+        ) : (
+          <StatusPill label={abriu ? 'Comeu' : 'Negado'} tone={abriu ? 'success' : 'warning'} />
+        )
       ) : null}
     </View>
   );

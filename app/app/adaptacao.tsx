@@ -9,8 +9,11 @@ import { simulator, useDeviceStore } from '../src/store/deviceStore';
 import { useCatsStore } from '../src/store/catsStore';
 import { learningSamples, useEventsStore } from '../src/store/eventsStore';
 import { Cluster, MIN_SAMPLES, clusterWeights, histogram } from '../src/domain/learning';
-import { CAT_EMOJIS, Cat, CatId, FIXED_TOLERANCE_G, makeDefaultCat } from '../src/domain/cats';
+import { CAT_EMOJIS, Cat, CatColorKey, CatId, FIXED_TOLERANCE_G, makeDefaultCat } from '../src/domain/cats';
 import { formatKg } from '../src/domain/format';
+
+/** Cor de cada grupo identificado: a do avatar e a que fica salva no gato. */
+const CORES_DOS_GRUPOS: CatColorKey[] = ['laranja', 'azul'];
 
 export default function AdaptacaoScreen() {
   const router = useRouter();
@@ -35,29 +38,32 @@ export default function AdaptacaoScreen() {
   const [emojis, setEmojis] = useState<string[]>(['🐱', '🐈']);
 
   async function salvarIdentificacao() {
-    const store = useCatsStore.getState();
     const clusters = resultado.clusters;
-
-    for (let i = 0; i < 2; i++) {
+    const novos: Cat[] = [0, 1].map((i) => {
       const id = (i + 1) as CatId;
       const base = cats.find((c) => c.id === id) ?? makeDefaultCat(id);
-      const novo: Cat = {
+      return {
         ...base,
         name: nomes[i].trim(),
         emoji: emojis[i],
+        // a mesma cor do avatar mostrado no grupo
+        color: CORES_DOS_GRUPOS[i],
         weightG: clusters[i].centerG,
         toleranceG: FIXED_TOLERANCE_G,
         // o mais leve costuma ser o que está em dieta; o usuário troca depois se quiser
         rule: i === 0 ? 'allow' : 'deny',
       };
-      await store.saveCat(novo);
-    }
+    });
 
+    // Os dois juntos: validar um de cada vez contra o cadastro antigo recusaria
+    // pares validos (as faixas novas podem cruzar as antigas).
+    await useCatsStore.getState().saveCats(novos);
     await useDeviceStore.getState().setMode('auto');
     router.replace('/gatos');
   }
 
-  const podeSalvar = resultado.usable && nomes.every((n) => n.trim().length > 0);
+  // Salvar exige conexao: alem dos gatos, o comedouro precisa sair do modo adaptacao.
+  const podeSalvar = conectado && resultado.usable && nomes.every((n) => n.trim().length > 0);
 
   return (
     <ScrollView className={screen.page} contentContainerClassName={screen.content}>
@@ -176,7 +182,7 @@ export default function AdaptacaoScreen() {
           {resultado.clusters.map((grupo: Cluster, i: number) => (
             <View key={i} className="gap-2 rounded-xl border border-slate-200 p-3 dark:border-slate-700">
               <Row>
-                <CatAvatar emoji={emojis[i]} color={i === 0 ? 'laranja' : 'azul'} />
+                <CatAvatar emoji={emojis[i]} color={CORES_DOS_GRUPOS[i]} />
                 <View className="flex-1">
                   <Text className="text-base font-semibold text-slate-900 dark:text-slate-50">
                     Grupo {i + 1} — {formatKg(grupo.centerG)}
@@ -230,8 +236,9 @@ export default function AdaptacaoScreen() {
             onPress={() => run('salvar', salvarIdentificacao)}
           />
           <Text className={screen.hint}>
-            O mais leve entra como Liberado e o mais pesado como Em dieta. Dá para trocar depois na
-            aba Gatos.
+            {conectado
+              ? 'O mais leve entra como Liberado e o mais pesado como Em dieta. Dá para trocar depois na aba Gatos.'
+              : 'Conecte ao comedouro para salvar: ele recebe os dois gatos e volta ao modo automático.'}
           </Text>
         </Card>
       ) : null}

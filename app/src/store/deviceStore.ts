@@ -25,7 +25,7 @@ import {
 } from '../device/protocol';
 import { DeviceLink } from '../device/DeviceLink';
 import { MockLink } from '../device/MockLink';
-import { createLink } from '../device/createLink';
+import { LinkKind, createLink, defaultLinkKind, urlLinkOverride } from '../device/createLink';
 import { Cat, toDeviceCat } from '../domain/cats';
 import { STORAGE_KEYS, loadJson, saveJson } from '../data/storage';
 import { nowS } from '../domain/format';
@@ -57,6 +57,8 @@ interface Pending {
 
 interface DeviceStore {
   link: DeviceLink;
+  /** Simulador ou comedouro real (o que esta em uso de fato). */
+  linkKind: LinkKind;
   connection: ConnectionState;
   connectionError: string | null;
   status: StatusMsg | null;
@@ -67,6 +69,12 @@ interface DeviceStore {
 
   init: () => void;
   loadSettings: () => Promise<void>;
+  /** Le a escolha salva (simulador ou real) e carrega o historico daquele modo. */
+  restoreLink: () => Promise<void>;
+  /** Troca entre simulador e comedouro real; desconecta o anterior. */
+  switchLink: (kind: LinkKind) => Promise<void>;
+  /** Bluetooth nativo: esquece o comedouro salvo (a proxima conexao procura de novo). */
+  forgetDevice: () => Promise<void>;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   send: (msg: OutgoingMessage) => Promise<AckMsg>;
@@ -91,14 +99,34 @@ const pending = new Map<number, Pending>();
 let unsubscribers: (() => void)[] = [];
 
 /**
- * Instancia unica do transporte: simulador por padrao, BLE com `?ble=1` na URL.
- * Ver createLink.ts.
+ * Transporte em uso: simulador ou comedouro real (ver createLink.ts). Comeca com
+ * o palpite sincrono (URL na web, real no celular) e o bootstrap troca pela
+ * escolha salva antes de conectar. Cada tipo e criado uma vez so: voltar ao
+ * simulador reencontra o mesmo "comedouro" de antes, com o estado dele.
  */
-const link: DeviceLink = createLink();
+let link: DeviceLink = createLink(urlLinkOverride() ?? defaultLinkKind());
+const links: Partial<Record<LinkKind, DeviceLink>> = { [link.kind]: link };
+
+function linkFor(kind: LinkKind): DeviceLink {
+  const existente = links[kind];
+  if (existente) return existente;
+  const novo = createLink(kind);
+  // Navegador sem Web Bluetooth: pediu o real e veio o simulador.
+  links[novo.kind] ??= novo;
+  return links[novo.kind]!;
+}
 
 /** Acesso aos controles do simulador (undefined quando o transporte for BLE). */
 export function simulator(): MockLink['sim'] | undefined {
   return link instanceof MockLink ? link.sim : undefined;
+}
+
+function rejectPending(err: Error) {
+  pending.forEach((entry) => {
+    clearTimeout(entry.timer);
+    entry.reject(err);
+  });
+  pending.clear();
 }
 
 function settleAck(ack: AckMsg) {
@@ -174,6 +202,7 @@ function handleSyncEnd(last: number) {
 
 export const useDeviceStore = create<DeviceStore>((set, get) => ({
   link,
+  linkKind: link.kind,
   connection: 'idle',
   connectionError: null,
   status: null,
@@ -230,13 +259,50 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
         }
 
         set({ connection: 'idle', status: null });
-        pending.forEach((entry) => {
-          clearTimeout(entry.timer);
-          entry.reject(new Error(describeError('disconnected')));
-        });
-        pending.clear();
+        rejectPending(new Error(describeError('disconnected')));
       }),
     );
+  },
+
+  restoreLink: async () => {
+    const salvo = await loadJson<LinkKind | null>(STORAGE_KEYS.link, null);
+    const desejado = urlLinkOverride() ?? salvo ?? defaultLinkKind();
+    if (desejado !== link.kind) {
+      await get().switchLink(desejado);
+    } else {
+      await useEventsStore.getState().load(link.kind);
+    }
+  },
+
+  switchLink: async (kind) => {
+    const novo = linkFor(kind);
+    await saveJson(STORAGE_KEYS.link, novo.kind);
+    if (novo === link) return;
+
+    // Desconecta o anterior com as assinaturas ainda ligadas: a tela ve a queda.
+    try {
+      await link.disconnect();
+    } catch {
+      // ja estava desconectado
+    }
+    rejectPending(new Error(describeError('disconnected')));
+
+    link = novo;
+    set({
+      link,
+      linkKind: link.kind,
+      connection: link.isConnected() ? 'connected' : 'idle',
+      connectionError: null,
+      status: null,
+      cfgDump: null,
+    });
+    get().init(); // assina as mensagens do transporte novo
+    await useEventsStore.getState().load(link.kind);
+  },
+
+  forgetDevice: async () => {
+    await link.forget?.();
+    set({ connection: 'idle', status: null, connectionError: null });
   },
 
   connect: async () => {
@@ -318,6 +384,8 @@ export const useDeviceStore = create<DeviceStore>((set, get) => ({
   setSettings: async (settings) => {
     set({ settings });
     await saveJson(STORAGE_KEYS.settings, settings);
+    // Desconectado fica so salvo: vai para o comedouro no preparo da proxima conexao.
+    if (get().connection !== 'connected') return;
     await get().send({ t: 'cfg', ...settings });
   },
 

@@ -22,6 +22,14 @@
 
 import { Platform } from 'react-native';
 
+import {
+  FEEDER_NAME_PREFIX,
+  FEEDER_RX_UUID,
+  FEEDER_SERVICE_UUID,
+  FEEDER_TX_UUID,
+  Reconnector,
+  WriteQueue,
+} from './bleSession';
 import { APP_CHUNK_BYTES, FrameAssembler, FrameTooBigError, encodeFrames } from './framing';
 import { AppMessage, DeviceMessage, decodeDeviceMessage, encodeAppMessage } from './protocol';
 import {
@@ -32,17 +40,9 @@ import {
   Unsubscribe,
 } from './DeviceLink';
 
-/** Nordic UART Service — os mesmos UUIDs do firmware. */
-const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // app -> ESP (write)
-const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP -> app (notify)
-
-const DEVICE_NAME_PREFIX = 'Aliment';
-
-/** Espera entre tentativas de reconexao; depois da lista, RECONNECT_MAX_MS. */
-const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000];
-const RECONNECT_MAX_MS = 15000;
-const RECONNECT_MAX_ATTEMPTS = 10;
+const SERVICE_UUID = FEEDER_SERVICE_UUID;
+const RX_UUID = FEEDER_RX_UUID;
+const TX_UUID = FEEDER_TX_UUID;
 
 // --------------------------------------------------------------------- tipos
 // Declaracoes minimas da Web Bluetooth API. Evitam depender de
@@ -127,7 +127,7 @@ function asLinkError(err: unknown): LinkError {
 
 export class WebBleLink implements DeviceLink {
   readonly kind = 'ble' as const;
-  readonly label = 'Feed Cat (Bluetooth)';
+  readonly label = 'FELIS (Bluetooth)';
 
   /** O comedouro escolhido no seletor. Fica guardado para reconectar sem o seletor. */
   private device: BleDevice | null = null;
@@ -138,14 +138,16 @@ export class WebBleLink implements DeviceLink {
   private readonly assembler = new FrameAssembler();
 
   /** Fila de escrita: cada mensagem so comeca quando a anterior terminou. */
-  private writeChain: Promise<void> = Promise.resolve();
-  /** Muda a cada sessao; escrita enfileirada numa sessao que caiu desiste. */
-  private session = 0;
+  private readonly queue = new WriteQueue();
 
   /** true depois de disconnect(): a queda foi pedida, entao nao reconecta. */
   private userDisconnected = false;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempts = 0;
+  private readonly reconnector = new Reconnector({
+    attempt: () => this.openSession(),
+    shouldTry: () => !this.connected && !this.userDisconnected && this.device !== null,
+    onFailedAttempt: () => this.closeGattQuietly(),
+    onGiveUp: () => console.warn('[ble] desisti de reconectar sozinho; toque em Conectar'),
+  });
 
   private messageHandlers = new Set<DeviceMessageHandler>();
   private connectionHandlers = new Set<ConnectionHandler>();
@@ -168,7 +170,7 @@ export class WebBleLink implements DeviceLink {
     this.dropSession();
     if (estavaConectado) this.emitConnection(false);
     // So reconecta sozinho uma sessao que chegou a funcionar e caiu sem ninguem pedir.
-    if (estavaConectado && !this.userDisconnected) this.scheduleReconnect();
+    if (estavaConectado && !this.userDisconnected) this.reconnector.schedule();
   };
 
   isConnected(): boolean {
@@ -183,7 +185,7 @@ export class WebBleLink implements DeviceLink {
     if (this.connected) return;
 
     this.userDisconnected = false;
-    this.cancelReconnect();
+    this.reconnector.cancel();
 
     // Comedouro ja escolhido nesta aba: reconecta direto, sem abrir o seletor.
     if (this.device?.gatt) {
@@ -203,7 +205,7 @@ export class WebBleLink implements DeviceLink {
       // entra como segunda opcao para o caso de um firmware antigo que ainda
       // nao anuncia o UUID.
       const escolhido = await ble.requestDevice({
-        filters: [{ services: [SERVICE_UUID] }, { namePrefix: DEVICE_NAME_PREFIX }],
+        filters: [{ services: [SERVICE_UUID] }, { namePrefix: FEEDER_NAME_PREFIX }],
         optionalServices: [SERVICE_UUID],
       });
       this.adoptDevice(escolhido);
@@ -216,7 +218,7 @@ export class WebBleLink implements DeviceLink {
 
   async disconnect(): Promise<void> {
     this.userDisconnected = true;
-    this.cancelReconnect();
+    this.reconnector.cancel();
     const estavaConectado = this.connected;
 
     try {
@@ -245,21 +247,16 @@ export class WebBleLink implements DeviceLink {
       throw err;
     }
 
-    const sessao = this.session;
-    const escrever = async () => {
-      for (const pacote of pacotes) {
-        // A conexao caiu enquanto esta mensagem esperava na fila.
-        if (sessao !== this.session || !this.connected || !this.rx) throw disconnectedError();
-        await this.rx.writeValueWithResponse(pacote);
-      }
-    };
-
-    // Encadeia na fila mesmo que a escrita anterior tenha falhado.
-    const resultado = this.writeChain.then(escrever, escrever);
-    this.writeChain = resultado.catch(() => undefined);
-
     try {
-      await resultado;
+      await this.queue.run(
+        pacotes,
+        async (pacote) => {
+          // A conexao caiu enquanto esta mensagem esperava na fila.
+          if (!this.connected || !this.rx) throw disconnectedError();
+          await this.rx.writeValueWithResponse(pacote as Uint8Array<ArrayBuffer>);
+        },
+        disconnectedError,
+      );
     } catch (err) {
       throw asLinkError(err);
     }
@@ -303,9 +300,8 @@ export class WebBleLink implements DeviceLink {
 
     this.rx = rx;
     this.tx = tx;
-    this.session++;
+    this.queue.reset();
     this.connected = true;
-    this.reconnectAttempts = 0;
     this.emitConnection(true);
   }
 
@@ -314,7 +310,7 @@ export class WebBleLink implements DeviceLink {
     this.connected = false;
     this.rx = null;
     this.tx = null;
-    this.session++; // escritas que ainda estao na fila desistem com 'disconnected'
+    this.queue.reset(); // escritas que ainda estao na fila desistem com 'disconnected'
     this.assembler.reset();
   }
 
@@ -324,36 +320,6 @@ export class WebBleLink implements DeviceLink {
     } catch {
       // ja desconectado
     }
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer || this.userDisconnected || !this.device) return;
-    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
-      console.warn('[ble] desisti de reconectar sozinho; toque em Conectar');
-      return;
-    }
-    const espera = RECONNECT_BACKOFF_MS[this.reconnectAttempts] ?? RECONNECT_MAX_MS;
-    this.reconnectAttempts++;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.tryReconnect();
-    }, espera);
-  }
-
-  private async tryReconnect(): Promise<void> {
-    if (this.connected || this.userDisconnected || !this.device) return;
-    try {
-      await this.openSession();
-    } catch {
-      this.closeGattQuietly();
-      this.scheduleReconnect();
-    }
-  }
-
-  private cancelReconnect(): void {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = null;
-    this.reconnectAttempts = 0;
   }
 
   private emitMessage(msg: DeviceMessage): void {

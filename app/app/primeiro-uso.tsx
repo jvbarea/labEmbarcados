@@ -19,7 +19,7 @@ export default function PrimeiroUsoScreen() {
     <ScrollView className={screen.page} contentContainerClassName={screen.content}>
       <Card className="gap-2">
         <Text className="text-4xl">🐱🐈</Text>
-        <SectionTitle hint="Cada gato come o que é dele">Bem-vindo ao Feed Cat</SectionTitle>
+        <SectionTitle hint="Cada gato come o que é dele">Bem-vindo ao FELIS</SectionTitle>
         <Text className={screen.body}>
           O comedouro pesa quem sobe na balança e só abre a porta para o gato certo. Há dois
           caminhos para começar.

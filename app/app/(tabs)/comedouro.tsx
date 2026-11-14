@@ -4,11 +4,13 @@ import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { BigButton, Card, KeyValue, Row, SectionTitle, StatusPill } from '../../src/ui/components';
 import { ConnectionPill, FeedbackBanner } from '../../src/ui/deviceViews';
 import { useAction } from '../../src/ui/hooks';
-import { doorLook, screen } from '../../src/ui/tokens';
-import { simulator, useDeviceStore } from '../../src/store/deviceStore';
+import { doorLook, doorLookOffline, screen } from '../../src/ui/tokens';
+import { DeviceSettings, simulator, useDeviceStore } from '../../src/store/deviceStore';
 import { useCatsStore } from '../../src/store/catsStore';
 import { useEventsStore } from '../../src/store/eventsStore';
 import { formatDuration, formatKg } from '../../src/domain/format';
+import { LIMITS } from '../../src/device/protocol';
+import { LinkKind, realLinkAvailable } from '../../src/device/createLink';
 
 /** Faixa aceita para a massa de referencia da calibracao, em gramas. */
 const MASSA_REF_MIN_G = 50;
@@ -27,6 +29,9 @@ export default function ComedouroScreen() {
   const status = useDeviceStore((s) => s.status);
   const connection = useDeviceStore((s) => s.connection);
   const settings = useDeviceStore((s) => s.settings);
+  // assinar o tipo de transporte faz a tela redesenhar quando ele troca
+  const linkKind = useDeviceStore((s) => s.linkKind);
+  const link = useDeviceStore((s) => s.link);
   const cats = useCatsStore((s) => s.cats);
   const eventos = useEventsStore((s) => s.events.length);
   const { run, feedback, isPending } = useAction();
@@ -36,8 +41,20 @@ export default function ComedouroScreen() {
   const massaRefInvalida = massaRef.trim().length > 0 && massaRefG === null;
   const sim = simulator();
   const router = useRouter();
-  const porta = doorLook[status?.door ?? 'closed'];
   const conectado = connection === 'connected';
+  const porta = conectado && status ? doorLook[status.door] : doorLookOffline;
+
+  function ajustar(campo: keyof DeviceSettings, valor: number) {
+    void run('ajuste', () => useDeviceStore.getState().setSettings({ ...settings, [campo]: valor }));
+  }
+
+  function trocarModo(kind: LinkKind) {
+    if (kind === linkKind) return;
+    void run('modo-link', async () => {
+      await useDeviceStore.getState().switchLink(kind);
+      await useDeviceStore.getState().connect();
+    });
+  }
   const emAdaptacao = status?.mode === 'learn';
 
   return (
@@ -46,11 +63,35 @@ export default function ComedouroScreen() {
 
       <Card className="gap-3">
         <Row className="justify-between">
-          <SectionTitle className="flex-1 pr-2" hint={useDeviceStore.getState().link.label}>
+          <SectionTitle className="flex-1 pr-2" hint={link.label}>
             Conexão
           </SectionTitle>
           <ConnectionPill />
         </Row>
+        <Row>
+          <Segmento
+            titulo="Comedouro real"
+            ativo={linkKind === 'ble'}
+            desabilitado={!realLinkAvailable() || isPending('modo-link')}
+            onPress={() => trocarModo('ble')}
+          />
+          <Segmento
+            titulo="Simulador"
+            ativo={linkKind === 'mock'}
+            desabilitado={isPending('modo-link')}
+            onPress={() => trocarModo('mock')}
+          />
+        </Row>
+        <Text className={screen.hint}>
+          {linkKind === 'ble'
+            ? 'Fala com a maquete pelo Bluetooth. O histórico deste modo é só das visitas de verdade.'
+            : 'Um comedouro de mentira, para testar e apresentar sem a maquete. Tem o próprio histórico, separado do real.'}
+        </Text>
+        {!realLinkAvailable() ? (
+          <Text className={screen.hint}>
+            Este navegador não tem Bluetooth: use o Chrome ou o Edge, ou o app instalado no Android.
+          </Text>
+        ) : null}
         {conectado ? (
           <BigButton
             title="Desconectar"
@@ -70,6 +111,21 @@ export default function ComedouroScreen() {
             }
           />
         )}
+        {link.forget ? (
+          <BigButton
+            title="Esquecer este comedouro"
+            icon="trash-bin"
+            variant="ghost"
+            loading={isPending('esquecer')}
+            onPress={() =>
+              run(
+                'esquecer',
+                () => useDeviceStore.getState().forgetDevice(),
+                'Comedouro esquecido. O próximo Conectar procura de novo.',
+              )
+            }
+          />
+        ) : null}
       </Card>
 
       <Card className="gap-3">
@@ -102,8 +158,14 @@ export default function ComedouroScreen() {
           <SectionTitle className="flex-1 pr-2">Porta</SectionTitle>
           <StatusPill label={porta.label} tone={porta.tone} icon={porta.icon as never} />
         </Row>
-        <KeyValue label="Fim de curso FECHADO" value={status?.fcC ? 'acionado' : 'livre'} />
-        <KeyValue label="Fim de curso ABERTO" value={status?.fcO ? 'acionado' : 'livre'} />
+        <KeyValue
+          label="Fim de curso FECHADO"
+          value={!conectado || !status ? '—' : status.fcC ? 'acionado' : 'livre'}
+        />
+        <KeyValue
+          label="Fim de curso ABERTO"
+          value={!conectado || !status ? '—' : status.fcO ? 'acionado' : 'livre'}
+        />
         {status?.door === 'fault' ? (
           <BigButton
             title="Rearmar porta"
@@ -189,17 +251,34 @@ export default function ComedouroScreen() {
           titulo="Tempo de confirmação"
           valor={formatDuration(settings.confMs / 1000)}
           explicacao="Quanto tempo o peso precisa ficar estável antes da porta abrir. Evita que a porta abra quando o gato só passa por cima da balança."
+          podeDiminuir={settings.confMs > LIMITS.confMs.min}
+          podeAumentar={settings.confMs < LIMITS.confMs.max}
+          onDiminuir={() => ajustar('confMs', Math.max(LIMITS.confMs.min, settings.confMs - 500))}
+          onAumentar={() => ajustar('confMs', Math.min(LIMITS.confMs.max, settings.confMs + 500))}
         />
         <Ajuste
           titulo="Espera para fechar"
           valor={formatDuration(settings.leaveMs / 1000)}
           explicacao="Quanto tempo o comedouro espera, depois que a balança fica vazia, antes de fechar. Evita fechar quando o gato só deu um passo para trás."
+          podeDiminuir={settings.leaveMs > LIMITS.leaveMs.min}
+          podeAumentar={settings.leaveMs < LIMITS.leaveMs.max}
+          onDiminuir={() => ajustar('leaveMs', Math.max(LIMITS.leaveMs.min, settings.leaveMs - 1000))}
+          onAumentar={() => ajustar('leaveMs', Math.min(LIMITS.leaveMs.max, settings.leaveMs + 1000))}
         />
         <Ajuste
           titulo="Duração do reabastecimento"
           valor={formatDuration(settings.maxOpenS)}
           explicacao="Quando você abre a porta para colocar ração, ela fecha sozinha depois deste tempo — assim ela nunca fica aberta por esquecimento."
+          podeDiminuir={settings.maxOpenS > LIMITS.refillS.min}
+          podeAumentar={settings.maxOpenS < LIMITS.refillS.max}
+          onDiminuir={() => ajustar('maxOpenS', Math.max(LIMITS.refillS.min, settings.maxOpenS - 60))}
+          onAumentar={() => ajustar('maxOpenS', Math.min(LIMITS.refillS.max, settings.maxOpenS + 60))}
         />
+        <Text className={screen.hint}>
+          {conectado
+            ? 'Cada toque já vale no comedouro.'
+            : 'Sem conexão: os ajustes ficam guardados e vão para o comedouro na próxima conexão.'}
+        </Text>
 
         <View className="h-px bg-slate-200 dark:bg-slate-800" />
 
@@ -251,7 +330,7 @@ export default function ComedouroScreen() {
 
       {sim ? (
         <Card className="gap-3 border-dashed border-marca-400">
-          <SectionTitle hint="Só existe no simulador; some quando o BLE real entrar">
+          <SectionTitle hint="Só aparece no modo Simulador">
             Painel do simulador
           </SectionTitle>
 
@@ -323,23 +402,94 @@ export default function ComedouroScreen() {
   );
 }
 
-/** Uma linha de ajuste: nome, valor e explicação em português claro. */
+/** Uma linha de ajuste: nome, valor com − / +, e explicação em português claro. */
 function Ajuste({
   titulo,
   valor,
   explicacao,
+  podeDiminuir,
+  podeAumentar,
+  onDiminuir,
+  onAumentar,
 }: {
   titulo: string;
   valor: string;
   explicacao: string;
+  podeDiminuir: boolean;
+  podeAumentar: boolean;
+  onDiminuir: () => void;
+  onAumentar: () => void;
 }) {
   return (
-    <View className="gap-0.5">
+    <View className="gap-1">
       <Row className="justify-between">
-        <Text className={screen.label}>{titulo}</Text>
-        <Text className="text-sm font-semibold text-slate-900 dark:text-slate-50">{valor}</Text>
+        <Text className={`flex-1 ${screen.label}`}>{titulo}</Text>
+        <Row className="gap-2">
+          <Passo simbolo="−" rotulo={`Diminuir ${titulo}`} ativo={podeDiminuir} onPress={onDiminuir} />
+          <Text className="min-w-16 text-center text-sm font-semibold text-slate-900 dark:text-slate-50">
+            {valor}
+          </Text>
+          <Passo simbolo="+" rotulo={`Aumentar ${titulo}`} ativo={podeAumentar} onPress={onAumentar} />
+        </Row>
       </Row>
       <Text className={screen.hint}>{explicacao}</Text>
     </View>
+  );
+}
+
+function Passo({
+  simbolo,
+  rotulo,
+  ativo,
+  onPress,
+}: {
+  simbolo: string;
+  rotulo: string;
+  ativo: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={rotulo}
+      disabled={!ativo}
+      onPress={onPress}
+      className={`h-10 w-10 items-center justify-center rounded-full border ${
+        ativo
+          ? 'border-marca-500 bg-marca-100 dark:bg-marca-900'
+          : 'border-slate-200 opacity-40 dark:border-slate-700'
+      }`}
+    >
+      <Text className="text-lg font-bold text-slate-900 dark:text-slate-50">{simbolo}</Text>
+    </Pressable>
+  );
+}
+
+/** Metade de um seletor de duas opções. */
+function Segmento({
+  titulo,
+  ativo,
+  desabilitado,
+  onPress,
+}: {
+  titulo: string;
+  ativo: boolean;
+  desabilitado?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected: ativo, disabled: desabilitado }}
+      disabled={desabilitado}
+      onPress={onPress}
+      className={`min-h-12 flex-1 items-center justify-center rounded-xl border px-3 py-2 ${
+        ativo
+          ? 'border-marca-500 bg-marca-100 dark:bg-marca-900'
+          : 'border-slate-200 dark:border-slate-700'
+      } ${desabilitado && !ativo ? 'opacity-40' : ''}`}
+    >
+      <Text className={screen.label}>{titulo}</Text>
+    </Pressable>
   );
 }

@@ -65,6 +65,13 @@ export const doorLook: Record<DoorState, { label: string; tone: PillTone; icon: 
   fault: { label: 'Falha', tone: 'danger', icon: 'warning' },
 };
 
+/** Porta quando o app nao sabe o estado: sem conexao, nao da para afirmar "fechada". */
+export const doorLookOffline: { label: string; tone: PillTone; icon: string } = {
+  label: 'Sem conexão',
+  tone: 'neutral',
+  icon: 'cloud-offline',
+};
+
 export type PillTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
 
 export const pillBox: Record<PillTone, string> = {

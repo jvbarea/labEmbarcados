@@ -30,8 +30,16 @@ async function conectar() {
 }
 
 describe('deviceStore: preparo da conexao', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     useDeviceStore.getState().init();
+    // No celular o padrao e o comedouro real; aqui o "comedouro" e o simulador.
+    await useDeviceStore.getState().switchLink('mock');
+  });
+
+  it('a troca de modo usa o simulador e carrega o historico dele', () => {
+    expect(useDeviceStore.getState().linkKind).toBe('mock');
+    expect(simulator()).toBeDefined();
+    expect(useEventsStore.getState().kind).toBe('mock');
   });
 
   beforeEach(() => {

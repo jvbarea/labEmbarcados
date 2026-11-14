@@ -6,6 +6,8 @@ node_modules/
 .expo/
 dist/
 web-build/
+# APKs gerados por app/scripts/build-apk.ps1 (~100 MB cada; regeraveis)
+app/dist-apk/
 
 # Zip do codigo herdado: o conteudo ja esta em teste_componentes/teste_esp/files/
 files.zip

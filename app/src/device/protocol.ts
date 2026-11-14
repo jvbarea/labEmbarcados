@@ -90,6 +90,11 @@ export interface StatusMsg {
   mode: DeviceMode;
   /** Versao da configuracao guardada no comedouro; muda a cada gravacao. */
   cfgV: number;
+  /**
+   * Reabastecendo: segundos que faltam para a porta fechar sozinha. Ausente
+   * fora do reabastecer (e em firmware antigo, que nao manda o campo).
+   */
+  refillS?: number;
 }
 
 /** Resposta ao cfgGet: tudo o que o comedouro tem na flash. */
@@ -209,7 +214,7 @@ export function decodeDeviceMessage(raw: string): DeviceMessage | null {
       if (!isInt(m.wG) || !isCatKey(m.cat)) return null;
       if (typeof m.door !== 'string' || !DOOR_STATES.includes(m.door as DoorState)) return null;
       if (!isFlag(m.fcC) || !isFlag(m.fcO)) return null;
-      return {
+      const st: StatusMsg = {
         t: 'st',
         wG: m.wG,
         cat: m.cat,
@@ -220,6 +225,8 @@ export function decodeDeviceMessage(raw: string): DeviceMessage | null {
         mode: m.mode === 'learn' ? 'learn' : 'auto',
         cfgV: isInt(m.cfgV) ? m.cfgV : 0,
       };
+      if (isInt(m.refillS) && m.refillS >= 0) st.refillS = m.refillS;
+      return st;
     }
     case 'cfgDump': {
       const cats = parseDeviceCats(m.cats);

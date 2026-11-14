@@ -21,6 +21,13 @@ interface CatsStore {
 
   load: () => Promise<void>;
   saveCat: (cat: Cat) => Promise<void>;
+  /**
+   * Salva varios gatos de uma vez (a identificacao da adaptacao grava os dois).
+   * Cada um e validado contra os OUTROS NOVOS, nao contra os antigos: trocar
+   * os pesos dos dois gatos e valido, mesmo que no meio do caminho as faixas
+   * se cruzassem.
+   */
+  saveCats: (cats: Cat[]) => Promise<void>;
   getCat: (id: CatId) => Cat | undefined;
   /** Envia ao comedouro as faixas dos gatos e a copia de nomes/emoji/cores. */
   syncToDevice: () => Promise<void>;
@@ -49,13 +56,19 @@ export const useCatsStore = create<CatsStore>((set, get) => ({
   },
 
   saveCat: async (cat) => {
-    const others = get().cats.filter((c) => c.id !== cat.id);
-    if (hasErrors(validateCat(cat, others))) {
-      throw new Error('Cadastro inválido.');
-    }
+    await get().saveCats([cat]);
+  },
+
+  saveCats: async (novos) => {
     const cats = get()
-      .cats.map((c) => (c.id === cat.id ? cat : c))
+      .cats.map((c) => novos.find((n) => n.id === c.id) ?? c)
       .sort((a, b) => a.id - b.id);
+    for (const cat of novos) {
+      const outros = cats.filter((c) => c.id !== cat.id);
+      if (hasErrors(validateCat(cat, outros))) {
+        throw new Error('Cadastro inválido.');
+      }
+    }
 
     set({ cats, configured: isConfigured(cats) });
     await saveJson(STORAGE_KEYS.cats, cats);

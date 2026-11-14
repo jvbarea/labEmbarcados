@@ -1,4 +1,4 @@
-# App Feed Cat — guia de teste no PC
+# App FELIS — guia de teste no PC
 
 App em **React Native + Expo (SDK 57)** do comedouro inteligente. Roda hoje contra um **comedouro simulado**, então
 dá para testar tudo sem a maquete e sem a ESP32.
@@ -114,7 +114,7 @@ Tudo pelo **painel do simulador**, no fim da aba **Comedouro**.
 
 | # | Passo | O que deve acontecer |
 |---|---|---|
-| 1 | Abrir o app pela primeira vez | aparece a tela "Bem-vindo ao Feed Cat" pedindo o cadastro dos dois gatos |
+| 1 | Abrir o app pela primeira vez | aparece a tela "Bem-vindo ao FELIS" pedindo o cadastro dos dois gatos |
 | 2 | Cadastrar **Mimi**: nome, emoji, cor, peso `3,2`, acesso **Liberado** | a faixa mostrada fica 2,70 kg — 3,70 kg (margem fixa de ± 500 g) |
 | 3 | Cadastrar **Bolota**: peso `6,5`, acesso **Em dieta** | salva normalmente |
 | 4 | Tentar salvar Bolota com peso `3,4` | aparece o aviso de que a faixa encosta na da Mimi e o botão Salvar fica desabilitado |
